@@ -214,16 +214,12 @@ def _build_chave_concil(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.Data
         num = (row.get('numero_lote_norm') or '').strip()
         arq = (row.get('lote_arquivo_norm') or '').strip()
 
-        # Se numero_lote existir no demonstrativo, use-o.
         if num and num in demo_keys:
             return num
-        # Caso contrário, se o lote do arquivo existir no demonstrativo, use-o.
         if arq and arq in demo_keys:
             return arq
-        # Heurística: numero_lote começando com lote_arquivo (ex.: 9046511 ~ 90465)
         if num and arq and num.startswith(arq) and arq in demo_keys:
             return arq
-        # Fallback final
         return num or arq or None
 
     df['chave_concil'] = df.apply(choose, axis=1)
@@ -243,7 +239,6 @@ def _make_baixa_por_lote(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.Dat
 
     tmp = _build_chave_concil(df_xml, demo_agg)
 
-    # Agregado XML por chave_concil
     xml_lote = (
         tmp.groupby('chave_concil', dropna=False)
            .agg(qtde_arquivos=('arquivo', 'count'),
@@ -254,7 +249,6 @@ def _make_baixa_por_lote(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.Dat
            .reset_index()
     )
 
-    # Demo com mesma chave (demo_agg['numero_lote'] já é normalizado)
     demo_key = demo_agg.copy().assign(chave_concil=demo_agg['numero_lote'])
 
     baixa = xml_lote.merge(
@@ -340,6 +334,33 @@ def _auditar_alertas(df: pd.DataFrame) -> None:
         )
 
 # =========================================================
+# 🔒 Banco acumulado de Demonstrativos (session_state)
+# =========================================================
+if 'demo_bank' not in st.session_state:
+    st.session_state.demo_bank = pd.DataFrame(
+        columns=['numero_lote', 'competencia', 'valor_apresentado', 'valor_apurado', 'valor_glosa', 'linhas']
+    )
+
+def _agg_demo(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante agregação por (numero_lote, competencia) após concatenação de múltiplos demonstrativos."""
+    if df.empty:
+        return df
+    df = df.copy()
+    return (df.groupby(['numero_lote', 'competencia'], dropna=False, as_index=False)
+              .agg(valor_apresentado=('valor_apresentado','sum'),
+                   valor_apurado=('valor_apurado','sum'),
+                   valor_glosa=('valor_glosa','sum'),
+                   linhas=('linhas','sum')))
+
+def _add_to_demo_bank(demo_new: pd.DataFrame):
+    bank = st.session_state.demo_bank
+    bank = pd.concat([bank, demo_new], ignore_index=True)
+    st.session_state.demo_bank = _agg_demo(bank)
+
+def _clear_demo_bank():
+    st.session_state.demo_bank = st.session_state.demo_bank.iloc[0:0]
+
+# =========================================================
 # Upload
 # =========================================================
 with tab1:
@@ -348,19 +369,43 @@ with tab1:
         type=['xml'],
         accept_multiple_files=True
     )
-    demo_file = st.file_uploader(
-        "Opcional: Anexe o Demonstrativo de Pagamento (.xlsx) para realizar a baixa por lote",
+    demo_files = st.file_uploader(
+        "Opcional: Anexe um ou mais Demonstrativos de Pagamento (.xlsx) e adicione-os ao banco acumulado",
         type=['xlsx'],
-        accept_multiple_files=False
+        accept_multiple_files=True,
+        key="demo_upload_tab1"
     )
 
-    demo_agg = pd.DataFrame()
-    if demo_file is not None:
-        try:
-            demo_agg = ler_demonstrativo_pagto_xlsx(demo_file)
-            st.success(f"Demonstrativo lido: {len(demo_agg)} lote(s) agregados.")
-        except Exception as e:
-            st.error(f"Erro ao ler Demonstrativo: {e}")
+    # ---- Painel do Banco de Demonstrativos
+    st.markdown("### Banco de Demonstrativos (acumulado)")
+    bcol1, bcol2, bcol3 = st.columns([1,1,2])
+    with bcol1:
+        add_disabled = not bool(demo_files)
+        if st.button("➕ Adicionar demonstrativo(s) ao banco", disabled=add_disabled, use_container_width=True):
+            try:
+                demos = []
+                for f in demo_files:
+                    if hasattr(f, 'seek'):
+                        f.seek(0)
+                    demos.append(ler_demonstrativo_pagto_xlsx(f))
+                if demos:
+                    _add_to_demo_bank(pd.concat(demos, ignore_index=True))
+                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). "
+                               f"Lotes únicos no banco: {st.session_state.demo_bank['numero_lote'].nunique()}")
+            except Exception as e:
+                st.error(f"Erro ao processar demonstrativo(s): {e}")
+    with bcol2:
+        if st.button("🗑️ Limpar banco", use_container_width=True):
+            _clear_demo_bank()
+            st.info("Banco de demonstrativos limpo.")
+    with bcol3:
+        if not st.session_state.demo_bank.empty:
+            lotes = st.session_state.demo_bank['numero_lote'].nunique()
+            st.caption(f"**{lotes}** lote(s) no banco. Use a seção abaixo normalmente — a conciliação "
+                       f"usará o banco acumulado automaticamente.")
+
+    # ---- Rodar a leitura dos XMLs
+    demo_agg_in_use = st.session_state.demo_bank.copy()  # sempre prioriza o banco, se existir
 
     if files:
         resultados: List[Dict] = []
@@ -368,7 +413,7 @@ with tab1:
             try:
                 if hasattr(f, "seek"):
                     f.seek(0)
-                res = parse_tiss_xml(f)  # pode retornar 'protocolo' para RECURSO
+                res = parse_tiss_xml(f)
                 res['arquivo'] = f.name
                 if 'erro' not in res:
                     res['erro'] = None
@@ -387,17 +432,16 @@ with tab1:
 
         if resultados:
             df = pd.DataFrame(resultados)
-            df = _df_format(df)  # numérico p/ cálculos + colunas auxiliares
+            df = _df_format(df)
 
-            # >>> Merge com Demonstrativo — usando chave inteligente
-            if not demo_agg.empty:
-                df_keys = _build_chave_concil(df, demo_agg)
+            # >>> Merge com Demonstrativo (usando o banco se existir)
+            if not demo_agg_in_use.empty:
+                df_keys = _build_chave_concil(df, demo_agg_in_use)
 
-                map_glosa   = dict(zip(demo_agg['numero_lote'], demo_agg['valor_glosa']))
-                map_apurado = dict(zip(demo_agg['numero_lote'], demo_agg['valor_apurado']))
-                map_comp    = dict(zip(demo_agg['numero_lote'], demo_agg['competencia']))
+                map_glosa   = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['valor_glosa']))
+                map_apurado = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['valor_apurado']))
+                map_comp    = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['competencia']))
 
-                # Preenche por chave_concil (agora respeitando o que existe no demonstrativo)
                 df['numero_lote_norm'] = df_keys['numero_lote_norm']
                 df['lote_arquivo_norm'] = df_keys['lote_arquivo_norm']
                 df['chave_concil'] = df_keys['chave_concil']
@@ -419,11 +463,10 @@ with tab1:
             agg_disp = _df_display_currency(agg, ['valor_total'])
             st.dataframe(agg_disp, use_container_width=True)
 
-            # Nova seção: Baixa por nº do lote (XML × Demonstrativo)
             baixa = pd.DataFrame()
-            if not demo_agg.empty:
+            if not demo_agg_in_use.empty:
                 st.subheader("Baixa por nº do lote (XML × Demonstrativo)")
-                baixa = _make_baixa_por_lote(df, demo_agg)
+                baixa = _make_baixa_por_lote(df, demo_agg_in_use)
                 baixa_disp = baixa.copy()
                 for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
                           'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
@@ -454,7 +497,7 @@ with tab1:
                         if hasattr(escolhido, "seek"):
                             escolhido.seek(0)
                         linhas = audit_por_guia(escolhido)
-                        df_a = pd.DataFrame(linhas)  # RECURSO/CONSULTA/SADT
+                        df_a = pd.DataFrame(linhas)
                         df_a_disp = df_a.copy()
                         for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
                             if c in df_a_disp.columns:
@@ -475,12 +518,34 @@ with tab2:
         "Caminho da pasta com XMLs (ex.: ./data ou C:\\repos\\tiss-xmls)",
         value="./data"
     )
-    demo_file_local = st.file_uploader(
-        "Opcional: Anexe o Demonstrativo de Pagamento (.xlsx) para baixar os lotes lidos da pasta",
+    st.caption("Esta aba reutiliza o mesmo **banco de demonstrativos** da aba de Upload (acumulado).")
+
+    demo_files_local = st.file_uploader(
+        "Adicionar mais Demonstrativos (.xlsx) ao banco (opcional)",
         type=['xlsx'],
-        accept_multiple_files=False,
-        key="demo_local"
+        accept_multiple_files=True,
+        key="demo_upload_tab2"
     )
+    lcol1, lcol2 = st.columns([1,1])
+    with lcol1:
+        add_disabled_local = not bool(demo_files_local)
+        if st.button("➕ Adicionar demonstrativo(s) ao banco (aba Pasta)", disabled=add_disabled_local, use_container_width=True):
+            try:
+                demos = []
+                for f in demo_files_local:
+                    if hasattr(f, 'seek'):
+                        f.seek(0)
+                    demos.append(ler_demonstrativo_pagto_xlsx(f))
+                if demos:
+                    _add_to_demo_bank(pd.concat(demos, ignore_index=True))
+                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). "
+                               f"Lotes únicos no banco: {st.session_state.demo_bank['numero_lote'].nunique()}")
+            except Exception as e:
+                st.error(f"Erro ao processar demonstrativo(s): {e}")
+    with lcol2:
+        if st.button("🗑️ Limpar banco (aba Pasta)", use_container_width=True):
+            _clear_demo_bank()
+            st.info("Banco de demonstrativos limpo.")
 
     if st.button("Ler pasta"):
         p = Path(pasta)
@@ -495,22 +560,15 @@ with tab2:
                 df = pd.DataFrame(resultados)
                 df = _df_format(df)
 
-                demo_agg_local = pd.DataFrame()
-                if demo_file_local is not None:
-                    try:
-                        demo_agg_local = ler_demonstrativo_pagto_xlsx(demo_file_local)
-                        st.success(f"Demonstrativo lido: {len(demo_agg_local)} lote(s) agregados.")
-                    except Exception as e:
-                        st.error(f"Erro ao ler Demonstrativo: {e}")
+                demo_agg_in_use = st.session_state.demo_bank.copy()
 
                 baixa_local = pd.DataFrame()
-                if not demo_agg_local.empty:
-                    # Constrói chave e preenche campos com base na chave
-                    df_keys = _build_chave_concil(df, demo_agg_local)
+                if not demo_agg_in_use.empty:
+                    df_keys = _build_chave_concil(df, demo_agg_in_use)
 
-                    map_glosa   = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['valor_glosa']))
-                    map_apurado = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['valor_apurado']))
-                    map_comp    = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['competencia']))
+                    map_glosa   = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['valor_glosa']))
+                    map_apurado = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['valor_apurado']))
+                    map_comp    = dict(zip(demo_agg_in_use['numero_lote'], demo_agg_in_use['competencia']))
 
                     df['numero_lote_norm'] = df_keys['numero_lote_norm']
                     df['lote_arquivo_norm'] = df_keys['lote_arquivo_norm']
@@ -520,7 +578,7 @@ with tab2:
                     df['valor_liberado'] = df['chave_concil'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
                     df['competencia']    = df['chave_concil'].map(map_comp).fillna(df.get('competencia', pd.Series([None]*len(df))))
 
-                    baixa_local = _make_baixa_por_lote(df, demo_agg_local)
+                    baixa_local = _make_baixa_por_lote(df, demo_agg_in_use)
 
                 df_disp = _df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado'])
 
