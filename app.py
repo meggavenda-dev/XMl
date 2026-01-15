@@ -5,10 +5,17 @@ from __future__ import annotations
 import io
 from decimal import Decimal
 from pathlib import Path
+from typing import List, Dict
+
 import pandas as pd
 import streamlit as st
 
-from tiss_parser import parse_tiss_xml, parse_many_xmls, __version__ as PARSER_VERSION
+from tiss_parser import (
+    parse_tiss_xml,
+    parse_many_xmls,
+    audit_por_guia,
+    __version__ as PARSER_VERSION
+)
 
 st.set_page_config(page_title="Leitor TISS XML", layout="wide")
 st.title("Leitor de XML TISS (Consulta e SP‑SADT)")
@@ -32,10 +39,17 @@ def _df_format(df: pd.DataFrame) -> pd.DataFrame:
     """
     if 'valor_total' in df.columns:
         df['valor_total'] = df['valor_total'].apply(_to_float)
+    if 'qtde_guias' in df.columns and 'valor_total' in df.columns:
+        df['suspeito'] = (df['qtde_guias'] > 0) & (df['valor_total'] == 0)
+    else:
+        df['suspeito'] = False
 
-    df['suspeito'] = (df.get('qtde_guias', 0) > 0) & (df.get('valor_total', 0) == 0)
+    # Se erro não existir, cria coluna nula para facilitar exibição
+    if 'erro' not in df.columns:
+        df['erro'] = None
 
-    ordenar = ['numero_lote', 'tipo', 'qtde_guias', 'valor_total', 'estrategia_total', 'arquivo', 'suspeito', 'erro', 'parser_version']
+    ordenar = ['numero_lote', 'tipo', 'qtde_guias', 'valor_total', 'estrategia_total',
+               'arquivo', 'suspeito', 'erro', 'parser_version']
     cols = [c for c in ordenar if c in df.columns] + [c for c in df.columns if c not in ordenar]
     df = df[cols].sort_values(['numero_lote', 'tipo', 'arquivo'], ignore_index=True)
     return df
@@ -75,7 +89,7 @@ def _download_excel_button(df_resumo: pd.DataFrame, df_agg: pd.DataFrame, df_aud
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-def _auditar(df: pd.DataFrame) -> None:
+def _auditar_alertas(df: pd.DataFrame) -> None:
     """
     Emite alertas de auditoria visual (suspeitos e erros).
     """
@@ -93,7 +107,7 @@ def _auditar(df: pd.DataFrame) -> None:
                  ", ".join(err['arquivo'].head(5).tolist()))
 
 # ----------------------------
-# UPLOAD
+# Upload
 # ----------------------------
 with tab1:
     files = st.file_uploader(
@@ -102,10 +116,12 @@ with tab1:
         accept_multiple_files=True
     )
     if files:
-        resultados = []
+        resultados: List[Dict] = []
         for f in files:
             try:
                 # Passa UploadedFile (file-like) direto para o parser
+                if hasattr(f, "seek"):
+                    f.seek(0)
                 res = parse_tiss_xml(f)
                 res['arquivo'] = f.name  # mostra o nome original do upload
                 if 'erro' not in res:
@@ -134,7 +150,7 @@ with tab1:
             agg = _make_agg(df)
             st.dataframe(agg, use_container_width=True)
 
-            _auditar(df)
+            _auditar_alertas(df)
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -149,8 +165,30 @@ with tab1:
             with col3:
                 st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria.")
 
+            with st.expander("🔎 Auditoria por guia (opcional)"):
+                arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
+                if st.button("Gerar auditoria do arquivo selecionado"):
+                    # recupera UploadedFile correspondente
+                    escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
+                    if escolhido is not None:
+                        if hasattr(escolhido, "seek"):
+                            escolhido.seek(0)
+                        linhas = audit_por_guia(escolhido)
+                        df_a = pd.DataFrame(linhas)
+                        # Converte Decimals para float para exibição
+                        for c in ('total_tag', 'subtotal_itens'):
+                            if c in df_a.columns:
+                                df_a[c] = df_a[c].apply(_to_float)
+                        st.dataframe(df_a, use_container_width=True)
+                        st.download_button(
+                            "Baixar auditoria (CSV)",
+                            df_a.to_csv(index=False).encode('utf-8'),
+                            file_name=f"auditoria_{arquivo_escolhido}.csv",
+                            mime="text/csv"
+                        )
+
 # ----------------------------
-# PASTA LOCAL (útil para rodar local/clonado)
+# Pasta local (útil para rodar local/clonado)
 # ----------------------------
 with tab2:
     pasta = st.text_input(
@@ -177,7 +215,7 @@ with tab2:
                 agg = _make_agg(df)
                 st.dataframe(agg, use_container_width=True)
 
-                _auditar(df)
+                _auditar_alertas(df)
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
