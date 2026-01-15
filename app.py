@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+import math
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Dict
@@ -28,14 +29,24 @@ st.caption(f"Extrai nº do lote, protocolo (quando houver), quantidade de guias 
 tab1, tab2 = st.tabs(["Upload de XML(s)", "Ler de uma pasta local (clonada do GitHub)"])
 
 # =========================================================
-# FORMATAÇÃO DE MOEDA (BR)
+# FORMATAÇÃO DE MOEDA (BR) — HOTFIX ROBUSTO
 # =========================================================
 def format_currency_br(val) -> str:
-    """Converte número em string 'R$ 1.234,56'. Valores inválidos viram 'R$ 0,00'."""
+    """
+    Converte número em string 'R$ 1.234,56'.
+    - Valores None/NaN/Inf/Inválidos -> 'R$ 0,00'
+    - Mantém sinal negativo com prefixo '-'
+    """
     try:
+        # Tenta caminho decimal → float
         v = float(Decimal(str(val)))
     except Exception:
         v = 0.0
+
+    # Trata NaN/Inf explicitamente
+    if not math.isfinite(v):
+        v = 0.0
+
     neg = v < 0
     v = abs(v)
     inteiro = int(v)
@@ -367,7 +378,7 @@ with tab1:
 
         if resultados:
             df = pd.DataFrame(resultados)
-            df = _df_format(df)  # numérico para cálculos + colunas auxiliares
+            df = _df_format(df)  # numérico p/ cálculos + colunas auxiliares
 
             # >>>>>>> Merge com Demonstrativo — preencher valor_glosado / valor_liberado e competência
             if not demo_agg.empty:
@@ -399,9 +410,10 @@ with tab1:
                 st.subheader("Baixa por nº do lote (XML × Demonstrativo)")
                 baixa = _make_baixa_por_lote(df, demo_agg)
                 baixa_disp = baixa.copy()
-                for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado', 'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
+                for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
+                          'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
                     if c in baixa_disp.columns:
-                        baixa_disp[c] = baixa_disp[c].apply(format_currency_br)
+                        baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)  # HOTFIX extra
                 st.dataframe(baixa_disp, use_container_width=True)
 
             _auditar_alertas(df)
@@ -507,9 +519,10 @@ with tab2:
                 if not baixa_local.empty:
                     st.subheader("Baixa por nº do lote (XML × Demonstrativo)")
                     baixa_disp = baixa_local.copy()
-                    for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado', 'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
+                    for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
+                              'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
                         if c in baixa_disp.columns:
-                            baixa_disp[c] = baixa_disp[c].apply(format_currency_br)
+                            baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)  # HOTFIX extra
                     st.dataframe(baixa_disp, use_container_width=True)
 
                 _auditar_alertas(df)
