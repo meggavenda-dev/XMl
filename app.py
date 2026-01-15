@@ -529,6 +529,31 @@ with tab1:
 
             with st.expander("🔎 Auditoria por guia (opcional)"):
                 
+
+# =========================================================
+# 🔎 Auditoria por guia (opcional)
+# =========================================================
+with st.expander("🔎 Auditoria por guia (opcional)"):
+    arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
+    if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
+        escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
+        if escolhido is not None:
+            if hasattr(escolhido, "seek"):
+                escolhido.seek(0)
+            linhas = audit_por_guia(escolhido)
+            df_a = pd.DataFrame(linhas)
+            df_a_disp = df_a.copy()
+            for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
+                if c in df_a_disp.columns:
+                    df_a_disp[c] = df_a_disp[c].apply(format_currency_br)
+            st.dataframe(df_a_disp, use_container_width=True)
+            st.download_button(
+                "Baixar auditoria (CSV)",
+                df_a.to_csv(index=False).encode('utf-8'),
+                file_name=f"auditoria_{arquivo_escolhido}.csv",
+                mime="text/csv"
+            )
+
 # =========================================================
 # 🧩 Comparar XML e remover guias duplicadas
 # =========================================================
