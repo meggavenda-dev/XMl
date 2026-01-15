@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
-from typing import IO, Union, List, Dict, Tuple
+from typing import IO, Union, List, Dict
 import xml.etree.ElementTree as ET
 
 # Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-__version__ = "2026.01.15-ptbr-03"
+__version__ = "2026.01.15-ptbr-04"
 
 class TissParsingError(Exception):
     pass
@@ -19,10 +19,7 @@ class TissParsingError(Exception):
 # Helpers
 # ----------------------------
 def _dec(txt: str | None) -> Decimal:
-    """
-    Converte string numérica do XML em Decimal; vazio/None => Decimal(0).
-    Faz replace de ',' por '.' por segurança.
-    """
+    """String numérica -> Decimal; vazio/None => 0. Troca ',' por '.' por segurança."""
     if not txt:
         return Decimal('0')
     return Decimal(txt.strip().replace(',', '.'))
@@ -40,78 +37,18 @@ def _get_numero_lote(root: ET.Element) -> str:
 # CONSULTA
 # ----------------------------
 def _sum_consulta(root: ET.Element) -> tuple[int, Decimal, str]:
-    """
-    Para CONSULTA: soma ans:procedimento/ans:valorProcedimento por ans:guiaConsulta.
-    Retorna (qtde_guias, total, estrategia_str).
-    """
+    """Soma ans:procedimento/ans:valorProcedimento por ans:guiaConsulta."""
     total = Decimal('0')
     guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaConsulta', ANS_NS)
     for g in guias:
         val_el = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
         total += _dec(val_el.text if val_el is not None else None)
-    estrategia = "consulta_valorProcedimento"
-    return len(guias), total, estrategia
+    return len(guias), total, "consulta_valorProcedimento"
 
 # ----------------------------
-# SADT - Estratégias em cascata (por guia)
+# SADT - soma por guia (robusta)
 # ----------------------------
-def _sum_sadt_by_total(guia: ET.Element) -> tuple[Decimal, str]:
-    """
-    (1) Tenta usar valorTotal/valorTotalGeral por guia SP-SADT.
-    """
-    vt = guia.find('.//ans:valorTotal', ANS_NS)
-    if vt is None:
-        return Decimal('0'), ''
-    vtg = vt.find('ans:valorTotalGeral', ANS_NS)
-    val = _dec(vtg.text if vtg is not None else None)
-    if val > 0:
-        return val, 'valorTotalGeral'
-    return Decimal('0'), ''
-
-def _sum_sadt_components(guia: ET.Element) -> tuple[Decimal, str]:
-    """
-    (2) Soma componentes do bloco valorTotal:
-        valorProcedimentos, valorDiarias, valorTaxasAlugueis,
-        valorMateriais, valorMedicamentos, valorGasesMedicinais.
-    Útil quando valorTotalGeral vem vazio, mas os componentes foram preenchidos.
-    """
-    total = Decimal('0')
-    vt = guia.find('.//ans:valorTotal', ANS_NS)
-    if vt is not None:
-        for tag in (
-            'valorProcedimentos',
-            'valorDiarias',
-            'valorTaxasAlugueis',
-            'valorMateriais',
-            'valorMedicamentos',
-            'valorGasesMedicinais',
-        ):
-            el = vt.find(f'ans:{tag}', ANS_NS)
-            total += _dec(el.text if el is not None else None)
-    if total > 0:
-        return total, 'componentes_valorTotal'
-    return Decimal('0'), ''
-
-def _sum_sadt_outras_despesas_itens(guia: ET.Element) -> tuple[Decimal, str]:
-    """
-    (3) Soma item a item em outrasDespesas/despesa/servicosExecutados/valorTotal.
-    """
-    total = Decimal('0')
-    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
-        sv = desp.find('ans:servicosExecutados', ANS_NS)
-        if sv is None:
-            continue
-        el_val = sv.find('ans:valorTotal', ANS_NS)
-        total += _dec(el_val.text if el_val is not None else None)
-    if total > 0:
-        return total, 'outrasDespesas_itens'
-    return Decimal('0'), ''
-
-def _sum_sadt_procedimentos_itens(guia: ET.Element) -> tuple[Decimal, str]:
-    """
-    (4) Soma item a item em procedimentosExecutados/procedimentoExecutado/valorTotal.
-        Se valorTotal do item não existir, usa valorUnitario * quantidadeExecutada.
-    """
+def _sum_itens_procedimentos(guia: ET.Element) -> Decimal:
     total = Decimal('0')
     for it in guia.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
         vtot = it.find('ans:valorTotal', ANS_NS)
@@ -122,42 +59,81 @@ def _sum_sadt_procedimentos_itens(guia: ET.Element) -> tuple[Decimal, str]:
             qtd  = it.find('ans:quantidadeExecutada', ANS_NS)
             if (vuni is not None and vuni.text) and (qtd is not None and qtd.text):
                 total += _dec(vuni.text) * _dec(qtd.text)
-    if total > 0:
-        return total, 'procedimentos_itens'
-    return Decimal('0'), ''
+    return total
 
-def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
+def _sum_itens_outras_desp(guia: ET.Element) -> Decimal:
+    total = Decimal('0')
+    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
+        sv = desp.find('ans:servicosExecutados', ANS_NS)
+        if sv is None:
+            continue
+        el_val = sv.find('ans:valorTotal', ANS_NS)
+        total += _dec(el_val.text if el_val is not None else None)
+    return total
+
+def _sum_componentes_valorTotal(guia: ET.Element) -> Decimal:
     """
-    Calcula total por guia SP-SADT seguindo a ordem de tentativa:
-      (1) valorTotalGeral
-      (2) componentes do bloco valorTotal
-      (3) outrasDespesas (itens)
-      (4) procedimentosExecutados (itens)
-    Retorna (qtde_guias, total, estrategia_total_arquivo).
+    Soma os componentes do bloco valorTotal da guia:
+    valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais, valorMedicamentos, valorGasesMedicinais
     """
     total = Decimal('0')
-    estrategias: Dict[str, int] = {}
+    # IMPORTANTE: buscar o bloco da guia diretamente (sem //)
+    vt = guia.find('ans:valorTotal', ANS_NS)
+    if vt is None:
+        return Decimal('0')
+    for tag in ('valorProcedimentos', 'valorDiarias', 'valorTaxasAlugueis',
+                'valorMateriais', 'valorMedicamentos', 'valorGasesMedicinais'):
+        el = vt.find(f'ans:{tag}', ANS_NS)
+        total += _dec(el.text if el is not None else None)
+    return total
+
+def _sum_sadt_guia(guia: ET.Element) -> tuple[Decimal, str]:
+    """
+    Estratégia por guia:
+      1) Tenta ans:valorTotal/ans:valorTotalGeral (do bloco da guia).
+      2) Se não houver/for 0, reconstrói preferindo ITENS (procedimentos + outras despesas).
+         Se itens vierem 0 mas componentes existirem, usa componentes.
+    """
+    # 1) Bloco valorTotal (da guia) sem // para evitar pegar item
+    vt = guia.find('ans:valorTotal', ANS_NS)
+    if vt is not None:
+        vtg = vt.find('ans:valorTotalGeral', ANS_NS)
+        vtg_val = _dec(vtg.text if vtg is not None else None)
+        if vtg_val > 0:
+            return vtg_val, 'valorTotalGeral'
+
+    # 2) Reconstrução
+    proc_itens  = _sum_itens_procedimentos(guia)
+    outras_itens = _sum_itens_outras_desp(guia)
+    itens_total = proc_itens + outras_itens
+
+    if itens_total > 0:
+        return itens_total, 'itens (proced+outras)'
+
+    # 3) Componentes como último recurso
+    comp_total = _sum_componentes_valorTotal(guia)
+    if comp_total > 0:
+        return comp_total, 'componentes_valorTotal'
+
+    return Decimal('0'), 'zero'
+
+def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
+    total = Decimal('0')
     guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaSP-SADT', ANS_NS)
+    estrategias: Dict[str, int] = {}
 
     for g in guias:
-        val, strat = _sum_sadt_by_total(g)
-        if val == 0:
-            val, strat = _sum_sadt_components(g)
-        if val == 0:
-            val, strat = _sum_sadt_outras_despesas_itens(g)
-        if val == 0:
-            val, strat = _sum_sadt_procedimentos_itens(g)
-        if val == 0:
-            strat = 'zero'
-        total += val
+        v, strat = _sum_sadt_guia(g)
+        total += v
         estrategias[strat] = estrategias.get(strat, 0) + 1
 
-    # Descrição da estratégia usada no arquivo
+    if not guias:
+        return 0, Decimal('0'), 'zero'
+
     if len(estrategias) == 1:
         estrategia_arquivo = next(iter(estrategias.keys()))
     else:
-        parts = [f"{k}={v}" for k, v in sorted(estrategias.items(), key=lambda x: (-x[1], x[0]))]
-        estrategia_arquivo = "misto: " + ", ".join(parts)
+        estrategia_arquivo = "misto: " + ", ".join(f"{k}={v}" for k, v in sorted(estrategias.items(), key=lambda x: (-x[1], x[0])))
 
     return len(guias), total, estrategia_arquivo
 
@@ -186,8 +162,6 @@ def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
 def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
     """
     Lê um XML TISS a partir de caminho (str/Path) OU arquivo (IO[bytes]/BytesIO).
-    Retorna um dicionário com: arquivo, numero_lote, tipo, qtde_guias,
-    valor_total (Decimal), estrategia_total (str), parser_version (str).
     """
     if hasattr(source, 'read'):  # UploadedFile/BytesIO
         try:
@@ -204,10 +178,6 @@ def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
     return _parse_root(root, path.name)
 
 def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
-    """
-    Processa vários XMLs (caminhos) e retorna lista de dicionários do parse_tiss_xml().
-    Em caso de erro por arquivo, inclui 'erro' no dict e mantém valor_total=0.
-    """
     resultados: List[Dict] = []
     for p in paths:
         try:
@@ -230,12 +200,12 @@ def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
 # ----------------------------
 def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     """
-    Retorna uma lista com uma linha por guia SP-SADT (ou CONSULTA), contendo:
-      - numeroGuiaPrestador (se existir)
-      - subtotal_itens (procedimentosExecutados + outrasDespesas)
-      - total_tag (valorTotal/valorTotalGeral quando houver)
-      - tipo (CONSULTA|SADT)
-    Útil para depurar divergências (ex.: tags vazias).
+    Uma linha por guia com:
+      - numeroGuiaPrestador
+      - total_tag (valorTotalGeral da guia)
+      - subtotal_itens_proc (soma dos itens de procedimentos)
+      - subtotal_itens_outras (soma dos itens de outrasDespesas)
+      - subtotal_itens (proc + outras)
     """
     if hasattr(source, 'read'):
         try:
@@ -253,45 +223,35 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     out: List[Dict] = []
     if _is_consulta(root):
         for g in root.findall('.//ans:guiaConsulta', ANS_NS):
-            # Em consulta o habitual é somar valorProcedimento por guia
             vp = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
+            v = _dec(vp.text if vp is not None else None)
             out.append({
                 'arquivo': arquivo_nome,
                 'tipo': 'CONSULTA',
                 'numeroGuiaPrestador': (g.find('.//ans:numeroGuiaPrestador', ANS_NS).text.strip()
                                         if g.find('.//ans:numeroGuiaPrestador', ANS_NS) is not None else ''),
-                'total_tag': _dec(vp.text if vp is not None else None),
-                'subtotal_itens': _dec(vp.text if vp is not None else None),
+                'total_tag': v,
+                'subtotal_itens_proc': v,
+                'subtotal_itens_outras': Decimal('0'),
+                'subtotal_itens': v,
             })
         return out
 
-    # SADT
     for g in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = g.find('.//ans:cabecalhoGuia', ANS_NS)
         num_prest = (cab.find('ans:numeroGuiaPrestador', ANS_NS).text.strip()
                      if cab is not None and cab.find('ans:numeroGuiaPrestador', ANS_NS) is not None else '')
-        # total na tag
-        vt = g.find('.//ans:valorTotal', ANS_NS)
-        vtg = _dec(vt.find('ans:valorTotalGeral', ANS_NS).text
-                   if vt is not None and vt.find('ans:valorTotalGeral', ANS_NS) is not None else None)
-        # subtotal por itens (procedimentos + outrasDespesas)
-        sub = Decimal('0')
-        for it in g.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
-            v = _dec(it.find('ans:valorTotal', ANS_NS).text if it.find('ans:valorTotal', ANS_NS) is not None else None)
-            if v == 0:
-                v = (_dec(it.find('ans:valorUnitario', ANS_NS).text if it.find('ans:valorUnitario', ANS_NS) is not None else None)
-                     * _dec(it.find('ans:quantidadeExecutada', ANS_NS).text if it.find('ans:quantidadeExecutada', ANS_NS) is not None else None))
-            sub += v
-        for desp in g.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
-            sv = desp.find('ans:servicosExecutados', ANS_NS)
-            if sv is not None:
-                sub += _dec(sv.find('ans:valorTotal', ANS_NS).text if sv.find('ans:valorTotal', ANS_NS) is not None else None)
-
+        vt = g.find('ans:valorTotal', ANS_NS)  # sem //
+        vtg = _dec(vt.find('ans:valorTotalGeral', ANS_NS).text) if (vt is not None and vt.find('ans:valorTotalGeral', ANS_NS) is not None) else Decimal('0')
+        proc = _sum_itens_procedimentos(g)
+        outras = _sum_itens_outras_desp(g)
         out.append({
             'arquivo': arquivo_nome,
             'tipo': 'SADT',
             'numeroGuiaPrestador': num_prest,
             'total_tag': vtg,
-            'subtotal_itens': sub,
+            'subtotal_itens_proc': proc,
+            'subtotal_itens_outras': outras,
+            'subtotal_itens': proc + outras,
         })
     return out
