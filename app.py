@@ -447,6 +447,17 @@ with tab1:
             st.subheader("Resumo por arquivo (XML)")
             st.dataframe(_df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado']), use_container_width=True)
 
+            if not demo_agg_in_use.empty:
+                baixa_upload = _make_baixa_por_lote(df, demo_agg_in_use)
+                if not baixa_upload.empty:
+                    st.subheader("Baixa por nº do lote (XML × Demonstrativo) — separa faturamento e recurso")
+                    baixa_disp = baixa_upload.copy()
+                    for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
+                              'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
+                        if c in baixa_disp.columns:
+                             baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)
+                    st.dataframe(baixa_disp, use_container_width=True)
+
             st.subheader("Agregado por nº do lote e tipo (XML)")
             agg = _make_agg(df)
             st.dataframe(_df_display_currency(agg, ['valor_total']), use_container_width=True)
