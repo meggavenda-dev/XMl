@@ -218,26 +218,53 @@ def ler_demonstrativo_pagto_xlsx(source) -> pd.DataFrame:
     )
     return demo_agg
 
+# =========================================================
+# Baixa por lote — agora com fallback por lote_arquivo
+# =========================================================
 def _make_baixa_por_lote(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.DataFrame:
     """
-    Produz tabela de baixa por lote: junta somatórios do XML com somatórios do Demonstrativo.
+    Produz tabela de baixa por lote com fallback:
+      1º tenta conciliar pelo numero_lote (normalizado);
+      se não houver, tenta pelo lote_arquivo (normalizado a partir do nome do arquivo).
     Colunas:
-      numero_lote | competencia | qtde_arquivos | qtde_guias_xml | valor_total_xml |
+      chave_concil | numero_lote (do XML) | lote_arquivo | competencia |
+      qtde_arquivos | qtde_guias_xml | valor_total_xml |
       valor_apresentado | valor_apurado | valor_glosa |
       liberado_plus_glosa | apresentado_diff | apresentado_confere | demonstrativo_confere
     """
     if df_xml.empty:
         return pd.DataFrame()
 
-    xml_lote = (df_xml.groupby('numero_lote', dropna=False)
-                .agg(qtde_arquivos=('arquivo', 'count'),
-                     qtde_guias_xml=('qtde_guias', 'sum'),
-                     valor_total_xml=('valor_total', 'sum'))
-                .reset_index())
+    tmp = df_xml.copy()
+
+    # Normalizações (se ainda não existirem)
+    if 'numero_lote_norm' not in tmp.columns:
+        tmp['numero_lote_norm'] = tmp['numero_lote'].apply(_norm_lote)
+    if 'lote_arquivo_norm' not in tmp.columns:
+        tmp['lote_arquivo_norm'] = tmp['lote_arquivo'].apply(_norm_lote)
+
+    # Chave de conciliação (preferência: numero_lote_norm; fallback: lote_arquivo_norm)
+    cond_num = tmp['numero_lote_norm'].notna() & (tmp['numero_lote_norm'].astype(str).str.strip() != '')
+    tmp['chave_concil'] = tmp['numero_lote_norm'].where(cond_num, tmp['lote_arquivo_norm'])
+
+    # Agregado XML por chave_concil
+    xml_lote = (
+        tmp.groupby('chave_concil', dropna=False)
+           .agg(qtde_arquivos=('arquivo', 'count'),
+                qtde_guias_xml=('qtde_guias', 'sum'),
+                valor_total_xml=('valor_total', 'sum'),
+                numero_lote=('numero_lote', 'first'),
+                lote_arquivo=('lote_arquivo', 'first'))
+           .reset_index()
+    )
+
+    # Demo com mesma chave (já normalizado em demo_agg['numero_lote'])
+    demo_key = demo_agg.copy()
+    demo_key = demo_key.assign(chave_concil=demo_key['numero_lote'])
 
     baixa = xml_lote.merge(
-        demo_agg[['numero_lote', 'competencia', 'valor_apresentado', 'valor_apurado', 'valor_glosa']],
-        on='numero_lote', how='left'
+        demo_key[['chave_concil', 'competencia', 'valor_apresentado', 'valor_apurado', 'valor_glosa']],
+        on='chave_concil', how='left'
     )
 
     # Conferências
@@ -247,7 +274,7 @@ def _make_baixa_por_lote(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.Dat
     baixa['liberado_plus_glosa'] = (baixa['valor_apurado'].fillna(0.0) + baixa['valor_glosa'].fillna(0.0))
     baixa['demonstrativo_confere'] = (baixa['valor_apresentado'].fillna(0.0) - baixa['liberado_plus_glosa']).abs() <= 0.01
 
-    baixa = baixa.sort_values('numero_lote', ignore_index=True)
+    baixa = baixa.sort_values('chave_concil', ignore_index=True)
     return baixa
 
 # =========================================================
@@ -380,18 +407,26 @@ with tab1:
             df = pd.DataFrame(resultados)
             df = _df_format(df)  # numérico p/ cálculos + colunas auxiliares
 
-            # >>>>>>> Merge com Demonstrativo — preencher valor_glosado / valor_liberado e competência
+            # >>>>>>> Merge com Demonstrativo — fallback por lote_arquivo se numero_lote não bater
             if not demo_agg.empty:
+                # Normalizações e chave de conciliação no df vindo do XML
+                df['numero_lote_norm'] = df['numero_lote'].apply(_norm_lote)
+                df['lote_arquivo_norm'] = df['lote_arquivo'].apply(_norm_lote)
+                cond_num = df['numero_lote_norm'].notna() & (df['numero_lote_norm'].astype(str).str.strip() != '')
+                df['chave_concil'] = df['numero_lote_norm'].where(cond_num, df['lote_arquivo_norm'])
+
+                # Mapas do demonstrativo (já normalizado)
                 map_glosa   = dict(zip(demo_agg['numero_lote'], demo_agg['valor_glosa']))
                 map_apurado = dict(zip(demo_agg['numero_lote'], demo_agg['valor_apurado']))
                 map_comp    = dict(zip(demo_agg['numero_lote'], demo_agg['competencia']))
 
-                df['valor_glosado']  = df['numero_lote'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
-                df['valor_liberado'] = df['numero_lote'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
+                # Preenche por chave_concil (preferindo numero_lote_norm; fallback: lote_arquivo_norm)
+                df['valor_glosado']  = df['chave_concil'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
+                df['valor_liberado'] = df['chave_concil'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
 
-                # Competência por lote (coluna nova)
-                df['competencia'] = df.get('competencia', pd.Series([None]*len(df)))
-                df['competencia'] = df['numero_lote'].map(map_comp).fillna(df['competencia'])
+                # Competência por lote (coluna nova, com fallback)
+                df['competencia'] = df.get('competencia', pd.Series([None] * len(df)))
+                df['competencia'] = df['chave_concil'].map(map_comp).fillna(df['competencia'])
             # <<<<<<< Fim do merge com Demonstrativo
 
             df_disp = _df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado'])
@@ -493,17 +528,26 @@ with tab2:
                     except Exception as e:
                         st.error(f"Erro ao ler Demonstrativo: {e}")
 
-                # Merge com Demonstrativo (pasta)
+                # Merge com Demonstrativo (pasta) — fallback por lote_arquivo
                 baixa_local = pd.DataFrame()
                 if not demo_agg_local.empty:
+                    # Normalizações e chave de conciliação
+                    df['numero_lote_norm'] = df['numero_lote'].apply(_norm_lote)
+                    df['lote_arquivo_norm'] = df['lote_arquivo'].apply(_norm_lote)
+                    cond_num = df['numero_lote_norm'].notna() & (df['numero_lote_norm'].astype(str).str.strip() != '')
+                    df['chave_concil'] = df['numero_lote_norm'].where(cond_num, df['lote_arquivo_norm'])
+
+                    # Mapas do demo
                     map_glosa   = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['valor_glosa']))
                     map_apurado = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['valor_apurado']))
                     map_comp    = dict(zip(demo_agg_local['numero_lote'], demo_agg_local['competencia']))
 
-                    df['valor_glosado']  = df['numero_lote'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
-                    df['valor_liberado'] = df['numero_lote'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
-                    df['competencia']    = df['numero_lote'].map(map_comp).fillna(df.get('competencia', pd.Series([None]*len(df))))
+                    # Preenchimentos com fallback
+                    df['valor_glosado']  = df['chave_concil'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
+                    df['valor_liberado'] = df['chave_concil'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
+                    df['competencia']    = df['chave_concil'].map(map_comp).fillna(df.get('competencia', pd.Series([None]*len(df))))
 
+                    # Baixa por lote com fallback
                     baixa_local = _make_baixa_por_lote(df, demo_agg_local)
 
                 df_disp = _df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado'])
