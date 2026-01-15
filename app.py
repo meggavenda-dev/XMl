@@ -526,126 +526,126 @@ with tab1:
                 _download_excel_button(df, agg, baixa if not baixa.empty else df, "Baixar resumo (Excel .xlsx)")
             with col3:
                 st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria/Baixa (moeda BR).")
-            
 
-# =========================================================
-# 🔎 Auditoria por guia (opcional)
-# =========================================================
-with st.expander("🔎 Auditoria por guia (opcional)"):
-    arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
-    if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
-        escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
-        if escolhido is not None:
-            if hasattr(escolhido, "seek"):
-                escolhido.seek(0)
-            linhas = audit_por_guia(escolhido)
-            df_a = pd.DataFrame(linhas)
-            df_a_disp = df_a.copy()
-            for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
-                if c in df_a_disp.columns:
-                    df_a_disp[c] = df_a_disp[c].apply(format_currency_br)
-            st.dataframe(df_a_disp, use_container_width=True)
-            st.download_button(
-                "Baixar auditoria (CSV)",
-                df_a.to_csv(index=False).encode('utf-8'),
-                file_name=f"auditoria_{arquivo_escolhido}.csv",
-                mime="text/csv"
-            )
-
-# =========================================================
-# 🧩 Comparar XML e remover guias duplicadas
-# =========================================================
-with st.expander("🧩 Comparar XML e remover guias duplicadas"):
-    arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados])
-    if st.button("Remover guias duplicadas do arquivo base", type="primary"):
-        base_file = next((f for f in files if f.name == arquivo_base), None)
-        outros_files = [f for f in files if f.name != arquivo_base]
-
-        if base_file is None or not outros_files:
-            st.warning("É necessário selecionar um arquivo base e ter outros arquivos para comparar.")
-        else:
-            # Auditoria do arquivo base
-            if hasattr(base_file, "seek"):
-                base_file.seek(0)
-            guias_base = audit_por_guia(base_file)
-
-            # Auditoria dos demais arquivos
-            guias_outros = []
-            for f in outros_files:
-                if hasattr(f, "seek"):
-                    f.seek(0)
-                guias_outros.extend(audit_por_guia(f))
-
-            # Identificar duplicidades
-            duplicadas = []
-            for g in guias_base:
-                chave = None
-                if g['tipo'] in ('CONSULTA', 'SADT'):
-                    chave = g.get('numeroGuiaPrestador')
-                elif g['tipo'] == 'RECURSO':
-                    chave = g.get('numeroGuiaOrigem') or g.get('numeroGuiaOperadora')
-                if chave:
-                    for o in guias_outros:
-                        chave_outro = None
-                        if o['tipo'] in ('CONSULTA', 'SADT'):
-                            chave_outro = o.get('numeroGuiaPrestador')
-                        elif o['tipo'] == 'RECURSO':
-                            chave_outro = o.get('numeroGuiaOrigem') or o.get('numeroGuiaOperadora')
-                        if chave_outro == chave:
-                            duplicadas.append(g)
-                            break
-
-            if not duplicadas:
-                st.success("Nenhuma guia duplicada encontrada.")
-            else:
-                st.warning(f"{len(duplicadas)} guia(s) duplicada(s) encontrada(s).")
-                df_dup = pd.DataFrame(duplicadas)
-                st.dataframe(df_dup, use_container_width=True)
-
-                # Remover duplicadas do XML original usando lxml
-                from lxml import etree
-
-                base_file.seek(0)
-                parser = etree.XMLParser(remove_blank_text=True)
-                tree = etree.parse(base_file, parser)
-                root = tree.getroot()
-
-                def remover_guias(root, duplicadas):
-                    for dup in duplicadas:
-                        tipo = dup['tipo']
-                        chave = dup.get('numeroGuiaPrestador') or dup.get('numeroGuiaOrigem') or dup.get('numeroGuiaOperadora')
-                        if not chave:
-                            continue
-                        if tipo == 'CONSULTA':
-                            for guia in root.xpath('.//ans:guiaConsulta', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                num = guia.find('.//ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                if num is not None and num.text.strip() == chave:
-                                    guia.getparent().remove(guia)
-                        elif tipo == 'SADT':
-                            for guia in root.xpath('.//ans:guiaSP-SADT', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                num = guia.find('.//ans:cabecalhoGuia/ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                if num is not None and num.text.strip() == chave:
-                                    guia.getparent().remove(guia)
-                        elif tipo == 'RECURSO':
-                            for guia in root.xpath('.//ans:recursoGuia', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                num = guia.find('.//ans:numeroGuiaOrigem', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                num2 = guia.find('.//ans:numeroGuiaOperadora', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                if (num is not None and num.text.strip() == chave) or (num2 is not None and num2.text.strip() == chave):
-                                    guia.getparent().remove(guia)
-                    return root
-
-                root = remover_guias(root, duplicadas)
-
-                # Gerar novo XML
-                buffer_xml = io.BytesIO()
-                tree.write(buffer_xml, encoding="utf-8", xml_declaration=True, pretty_print=True)
-
+    # =========================================================
+    # 🔎 Auditoria por guia (opcional)
+    # =========================================================
+    with st.expander("🔎 Auditoria por guia (opcional)"):
+        arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
+        if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
+            escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
+            if escolhido is not None:
+                if hasattr(escolhido, "seek"):
+                    escolhido.seek(0)
+                linhas = audit_por_guia(escolhido)
+                df_a = pd.DataFrame(linhas)
+                df_a_disp = df_a.copy()
+                for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
+                    if c in df_a_disp.columns:
+                        df_a_disp[c] = df_a_disp[c].apply(format_currency_br)
+                st.dataframe(df_a_disp, use_container_width=True)
                 st.download_button(
-                    "Baixar XML sem duplicadas",
-                    data=buffer_xml.getvalue(),
-                    file_name=f"{arquivo_base.replace('.xml','')}_sem_duplicadas.xml",
-                    mime="application/xml"
+                    "Baixar auditoria (CSV)",
+                    df_a.to_csv(index=False).encode('utf-8'),
+                    file_name=f"auditoria_{arquivo_escolhido}.csv",
+                    mime="text/csv"
                 )
+
+    # =========================================================
+    # 🧩 Comparar XML e remover guias duplicadas
+    # =========================================================
+    with st.expander("🧩 Comparar XML e remover guias duplicadas"):
+        arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados])
+        if st.button("Remover guias duplicadas do arquivo base", type="primary"):
+            base_file = next((f for f in files if f.name == arquivo_base), None)
+            outros_files = [f for f in files if f.name != arquivo_base]
+
+            if base_file is None or not outros_files:
+                st.warning("É necessário selecionar um arquivo base e ter outros arquivos para comparar.")
+            else:
+                # Auditoria do arquivo base
+                if hasattr(base_file, "seek"):
+                    base_file.seek(0)
+                guias_base = audit_por_guia(base_file)
+
+                # Auditoria dos demais arquivos
+                guias_outros = []
+                for f in outros_files:
+                    if hasattr(f, "seek"):
+                        f.seek(0)
+                    guias_outros.extend(audit_por_guia(f))
+
+                # Identificar duplicidades
+                duplicadas = []
+                for g in guias_base:
+                    chave = None
+                    if g['tipo'] in ('CONSULTA', 'SADT'):
+                        chave = g.get('numeroGuiaPrestador')
+                    elif g['tipo'] == 'RECURSO':
+                        chave = g.get('numeroGuiaOrigem') or g.get('numeroGuiaOperadora')
+                    if chave:
+                        for o in guias_outros:
+                            chave_outro = None
+                            if o['tipo'] in ('CONSULTA', 'SADT'):
+                                chave_outro = o.get('numeroGuiaPrestador')
+                            elif o['tipo'] == 'RECURSO':
+                                chave_outro = o.get('numeroGuiaOrigem') or o.get('numeroGuiaOperadora')
+                            if chave_outro == chave:
+                                duplicadas.append(g)
+                                break
+
+                if not duplicadas:
+                    st.success("Nenhuma guia duplicada encontrada.")
+                else:
+                    st.warning(f"{len(duplicadas)} guia(s) duplicada(s) encontrada(s).")
+                    df_dup = pd.DataFrame(duplicadas)
+                    st.dataframe(df_dup, use_container_width=True)
+
+                    # Remover duplicadas do XML original usando lxml
+                    from lxml import etree
+
+                    base_file.seek(0)
+                    parser = etree.XMLParser(remove_blank_text=True)
+                    tree = etree.parse(base_file, parser)
+                    root = tree.getroot()
+
+                    def remover_guias(root, duplicadas):
+                        for dup in duplicadas:
+                            tipo = dup['tipo']
+                            chave = dup.get('numeroGuiaPrestador') or dup.get('numeroGuiaOrigem') or dup.get('numeroGuiaOperadora')
+                            if not chave:
+                                continue
+                            if tipo == 'CONSULTA':
+                                for guia in root.xpath('.//ans:guiaConsulta', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
+                                    num = guia.find('.//ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
+                                    if num is not None and num.text.strip() == chave:
+                                        guia.getparent().remove(guia)
+                            elif tipo == 'SADT':
+                                for guia in root.xpath('.//ans:guiaSP-SADT', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
+                                    num = guia.find('.//ans:cabecalhoGuia/ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
+                                    if num is not None and num.text.strip() == chave:
+                                        guia.getparent().remove(guia)
+                            elif tipo == 'RECURSO':
+                                for guia in root.xpath('.//ans:recursoGuia', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
+                                    num = guia.find('.//ans:numeroGuiaOrigem', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
+                                    num2 = guia.find('.//ans:numeroGuiaOperadora', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
+                                    if (num is not None and num.text.strip() == chave) or (num2 is not None and num2.text.strip() == chave):
+                                        guia.getparent().remove(guia)
+                        return root
+
+                    root = remover_guias(root, duplicadas)
+
+                    # Gerar novo XML
+                    buffer_xml = io.BytesIO()
+                    tree.write(buffer_xml, encoding="utf-8", xml_declaration=True, pretty_print=True)
+
+                    st.download_button(
+                        "Baixar XML sem duplicadas",
+                        data=buffer_xml.getvalue(),
+                        file_name=f"{arquivo_base.replace('.xml','')}_sem_duplicadas.xml",
+                        mime="application/xml"
+                    )
+
 
                 arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
                 if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
