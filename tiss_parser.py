@@ -54,8 +54,9 @@ def _sum_sadt_by_total(guia: ET.Element) -> Decimal:
 def _sum_sadt_by_items(guia: ET.Element) -> Decimal:
     """
     Fallback: reconstrói total somando:
-      - valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais, valorMedicamentos, valorGasesMedicinais
-      - e, se houver, outrasDespesas/despesa/servicosExecutados/valorTotal (item a item)
+      - valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais,
+        valorMedicamentos, valorGasesMedicinais; e
+      - outrasDespesas/despesa/servicosExecutados/valorTotal (item a item), se houver.
     """
     total = Decimal('0')
 
@@ -117,13 +118,11 @@ def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
       'valor_total': Decimal('12198.38')
     }
     """
-    # Se for file-like (tem .read), usamos ET.parse direto
-    if hasattr(source, 'read'):
+    if hasattr(source, 'read'):  # UploadedFile/BytesIO
         root = ET.parse(source).getroot()
         arquivo_nome = getattr(source, 'name', 'upload.xml')
         return _parse_root(root, Path(arquivo_nome).name)
 
-    # Caso contrário, tratamos como caminho
     path = Path(source)
     root = ET.parse(path).getroot()
     return _parse_root(root, path.name)
