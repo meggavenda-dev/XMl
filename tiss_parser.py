@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
-from typing import IO, Union, List, Dict
+from typing import IO, Union, List, Dict, Tuple
 import xml.etree.ElementTree as ET
 
 # Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-__version__ = "2026.01.15-ptbr-02"
+__version__ = "2026.01.15-ptbr-03"
 
 class TissParsingError(Exception):
     pass
@@ -53,7 +53,7 @@ def _sum_consulta(root: ET.Element) -> tuple[int, Decimal, str]:
     return len(guias), total, estrategia
 
 # ----------------------------
-# SADT - Estratégias em cascata
+# SADT - Estratégias em cascata (por guia)
 # ----------------------------
 def _sum_sadt_by_total(guia: ET.Element) -> tuple[Decimal, str]:
     """
@@ -134,10 +134,6 @@ def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
       (3) outrasDespesas (itens)
       (4) procedimentosExecutados (itens)
     Retorna (qtde_guias, total, estrategia_total_arquivo).
-
-    A estratégia reportada no arquivo será:
-      - a estratégia única, se todas as guias usarem a mesma;
-      - "misto: <estratégia1=x>, <estratégia2=y>, ..." quando houver combinação.
     """
     total = Decimal('0')
     estrategias: Dict[str, int] = {}
@@ -153,11 +149,10 @@ def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
             val, strat = _sum_sadt_procedimentos_itens(g)
         if val == 0:
             strat = 'zero'
-
         total += val
         estrategias[strat] = estrategias.get(strat, 0) + 1
 
-    # Monta descrição de estratégia para o arquivo
+    # Descrição da estratégia usada no arquivo
     if len(estrategias) == 1:
         estrategia_arquivo = next(iter(estrategias.keys()))
     else:
@@ -167,7 +162,7 @@ def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
     return len(guias), total, estrategia_arquivo
 
 # ----------------------------
-# Parser público
+# API pública
 # ----------------------------
 def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
     numero_lote = _get_numero_lote(root)
@@ -194,13 +189,16 @@ def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
     Retorna um dicionário com: arquivo, numero_lote, tipo, qtde_guias,
     valor_total (Decimal), estrategia_total (str), parser_version (str).
     """
-    # UploadedFile/BytesIO
-    if hasattr(source, 'read'):
+    if hasattr(source, 'read'):  # UploadedFile/BytesIO
+        try:
+            if hasattr(source, 'seek'):
+                source.seek(0)
+        except Exception:
+            pass
         root = ET.parse(source).getroot()
         arquivo_nome = getattr(source, 'name', 'upload.xml')
         return _parse_root(root, Path(arquivo_nome).name)
 
-    # Caminho de arquivo
     path = Path(source)
     root = ET.parse(path).getroot()
     return _parse_root(root, path.name)
@@ -226,3 +224,74 @@ def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
                 'erro': str(e),
             })
     return resultados
+
+# ----------------------------
+# Auditoria por guia (opcional)
+# ----------------------------
+def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
+    """
+    Retorna uma lista com uma linha por guia SP-SADT (ou CONSULTA), contendo:
+      - numeroGuiaPrestador (se existir)
+      - subtotal_itens (procedimentosExecutados + outrasDespesas)
+      - total_tag (valorTotal/valorTotalGeral quando houver)
+      - tipo (CONSULTA|SADT)
+    Útil para depurar divergências (ex.: tags vazias).
+    """
+    if hasattr(source, 'read'):
+        try:
+            if hasattr(source, 'seek'):
+                source.seek(0)
+        except Exception:
+            pass
+        root = ET.parse(source).getroot()
+        arquivo_nome = getattr(source, 'name', 'upload.xml')
+    else:
+        p = Path(source)
+        root = ET.parse(p).getroot()
+        arquivo_nome = p.name
+
+    out: List[Dict] = []
+    if _is_consulta(root):
+        for g in root.findall('.//ans:guiaConsulta', ANS_NS):
+            # Em consulta o habitual é somar valorProcedimento por guia
+            vp = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
+            out.append({
+                'arquivo': arquivo_nome,
+                'tipo': 'CONSULTA',
+                'numeroGuiaPrestador': (g.find('.//ans:numeroGuiaPrestador', ANS_NS).text.strip()
+                                        if g.find('.//ans:numeroGuiaPrestador', ANS_NS) is not None else ''),
+                'total_tag': _dec(vp.text if vp is not None else None),
+                'subtotal_itens': _dec(vp.text if vp is not None else None),
+            })
+        return out
+
+    # SADT
+    for g in root.findall('.//ans:guiaSP-SADT', ANS_NS):
+        cab = g.find('.//ans:cabecalhoGuia', ANS_NS)
+        num_prest = (cab.find('ans:numeroGuiaPrestador', ANS_NS).text.strip()
+                     if cab is not None and cab.find('ans:numeroGuiaPrestador', ANS_NS) is not None else '')
+        # total na tag
+        vt = g.find('.//ans:valorTotal', ANS_NS)
+        vtg = _dec(vt.find('ans:valorTotalGeral', ANS_NS).text
+                   if vt is not None and vt.find('ans:valorTotalGeral', ANS_NS) is not None else None)
+        # subtotal por itens (procedimentos + outrasDespesas)
+        sub = Decimal('0')
+        for it in g.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
+            v = _dec(it.find('ans:valorTotal', ANS_NS).text if it.find('ans:valorTotal', ANS_NS) is not None else None)
+            if v == 0:
+                v = (_dec(it.find('ans:valorUnitario', ANS_NS).text if it.find('ans:valorUnitario', ANS_NS) is not None else None)
+                     * _dec(it.find('ans:quantidadeExecutada', ANS_NS).text if it.find('ans:quantidadeExecutada', ANS_NS) is not None else None))
+            sub += v
+        for desp in g.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
+            sv = desp.find('ans:servicosExecutados', ANS_NS)
+            if sv is not None:
+                sub += _dec(sv.find('ans:valorTotal', ANS_NS).text if sv.find('ans:valorTotal', ANS_NS) is not None else None)
+
+        out.append({
+            'arquivo': arquivo_nome,
+            'tipo': 'SADT',
+            'numeroGuiaPrestador': num_prest,
+            'total_tag': vtg,
+            'subtotal_itens': sub,
+        })
+    return out
