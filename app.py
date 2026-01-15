@@ -547,7 +547,7 @@ with tab1:
                         st.download_button("Baixar auditoria (CSV)", df_a.to_csv(index=False).encode('utf-8'), file_name=f"auditoria_{arquivo_escolhido}.csv", mime="text/csv")
 
             with st.expander("🧩 Comparar XML e remover guias duplicadas"):
-                arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados])
+                arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados], key="comparar_select")
                 if st.button("Remover guias duplicadas do arquivo base", type="primary"):
                     base_file = next((f for f in files if f.name == arquivo_base), None)
                     outros_files = [f for f in files if f.name != arquivo_base]
