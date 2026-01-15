@@ -396,19 +396,9 @@ def _clear_demo_bank():
 # Upload
 # =========================================================
 with tab1:
-    files = st.file_uploader(
-        "Selecione um ou mais arquivos XML TISS (Consulta, SP‑SADT ou Recurso de Glosa)",
-        type=['xml'],
-        accept_multiple_files=True
-    )
-    demo_files = st.file_uploader(
-        "Opcional: Anexe um ou mais Demonstrativos de Pagamento (.xlsx) e adicione-os ao banco acumulado",
-        type=['xlsx'],
-        accept_multiple_files=True,
-        key="demo_upload_tab1"
-    )
+    files = st.file_uploader("Selecione um ou mais arquivos XML TISS", type=['xml'], accept_multiple_files=True)
+    demo_files = st.file_uploader("Opcional: Demonstrativos (.xlsx)", type=['xlsx'], accept_multiple_files=True, key="demo_upload_tab1")
 
-    # ---- Painel do Banco de Demonstrativos
     st.markdown("### Banco de Demonstrativos (acumulado)")
     bcol1, bcol2, bcol3 = st.columns([1,1,2])
     with bcol1:
@@ -422,20 +412,18 @@ with tab1:
                     demos.append(ler_demonstrativo_pagto_xlsx(f))
                 if demos:
                     _add_to_demo_bank(pd.concat(demos, ignore_index=True))
-                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). "
-                               f"Lotes únicos no banco: {st.session_state.demo_bank['numero_lote'].nunique()}")
+                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). Lotes únicos: {st.session_state.demo_bank['numero_lote'].nunique()}")
             except Exception as e:
                 st.error(f"Erro ao processar demonstrativo(s): {e}")
     with bcol2:
-        if st.button("🗑️ Limpar banco", use_container_width=True):
+        if st.button("️ Limpar banco", use_container_width=True):
             _clear_demo_bank()
-            st.info("Banco de demonstrativos limpo.")
+            st.info("Banco limpo.")
     with bcol3:
         if not st.session_state.demo_bank.empty:
             lotes = st.session_state.demo_bank['numero_lote'].nunique()
-            st.caption(f"**{lotes}** lote(s) no banco. A conciliação usará o banco acumulado automaticamente.")
+            st.caption(f"**{lotes}** lote(s) no banco.")
 
-    # ---- Rodar a leitura dos XMLs
     demo_agg_in_use = st.session_state.demo_bank.copy()
 
     if files:
@@ -449,90 +437,26 @@ with tab1:
                 if 'erro' not in res:
                     res['erro'] = None
             except Exception as e:
-                res = {
-                    'arquivo': f.name,
-                    'numero_lote': '',
-                    'tipo': 'DESCONHECIDO',
-                    'qtde_guias': 0,
-                    'valor_total': Decimal('0'),
-                    'estrategia_total': 'erro',
-                    'parser_version': PARSER_VERSION,
-                    'erro': str(e),
-                }
+                res = {'arquivo': f.name, 'numero_lote': '', 'tipo': 'DESCONHECIDO', 'qtde_guias': 0, 'valor_total': Decimal('0'), 'estrategia_total': 'erro', 'parser_version': PARSER_VERSION, 'erro': str(e)}
             resultados.append(res)
 
         if resultados:
             df = pd.DataFrame(resultados)
             df = _df_format(df)
 
-            # >>> Conciliação com Demonstrativo (sem misturar RECURSO e FATURAMENTO)
-            if not demo_agg_in_use.empty:
-                df_keys = _build_chave_concil(df, demo_agg_in_use)
-
-                # Agregamos o demonstrativo por lote (sem competência) apenas para preencher colunas no "Resumo por arquivo"
-                demo_by_lote = (demo_agg_in_use.groupby('numero_lote', as_index=False)
-                                .agg(valor_apresentado=('valor_apresentado','sum'),
-                                     valor_apurado=('valor_apurado','sum'),
-                                     valor_glosa=('valor_glosa','sum')))
-
-                map_apres   = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_apresentado']))
-                map_apurado = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_apurado']))
-                map_glosa   = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_glosa']))
-
-                df['numero_lote_norm'] = df_keys['numero_lote_norm']
-                df['lote_arquivo_norm'] = df_keys['lote_arquivo_norm']
-                df['demo_lote'] = df_keys['demo_lote']
-                df['chave_concil'] = df_keys['chave_concil']
-
-                # Preenchemos valores do demonstrativo (quando houver) com base no demo_lote escolhido
-                df['valor_glosado']  = df['demo_lote'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
-                df['valor_liberado'] = df['demo_lote'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
-                # Coluna opcional para referência
-                df['valor_apresentado_demo'] = df['demo_lote'].map(map_apres).fillna(0.0)
-            # <<< Fim da conciliação
-
-            df_disp = _df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado', 'valor_apresentado_demo'])
-
             st.subheader("Resumo por arquivo (XML)")
-            st.dataframe(df_disp, use_container_width=True)
+            st.dataframe(_df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado']), use_container_width=True)
 
             st.subheader("Agregado por nº do lote e tipo (XML)")
             agg = _make_agg(df)
-            agg_disp = _df_display_currency(agg, ['valor_total'])
-            st.dataframe(agg_disp, use_container_width=True)
-
-            baixa = pd.DataFrame()
-            if not demo_agg_in_use.empty:
-                st.subheader("Baixa por nº do lote (XML × Demonstrativo) — separa faturamento e recurso")
-                baixa = _make_baixa_por_lote(df, demo_agg_in_use)
-                baixa_disp = baixa.copy()
-                for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
-                          'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
-                    if c in baixa_disp.columns:
-                        baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)
-                st.dataframe(baixa_disp, use_container_width=True)
-
-            _auditar_alertas(df)
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.download_button(
-                    "Baixar resumo (CSV)",
-                    df.to_csv(index=False).encode('utf-8'),
-                    file_name="resumo_xml_tiss.csv",
-                    mime="text/csv"
-                )
-            with col2:
-                _download_excel_button(df, agg, baixa if not baixa.empty else df, "Baixar resumo (Excel .xlsx)")
-            with col3:
-                st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria/Baixa (moeda BR).")
+            st.dataframe(_df_display_currency(agg, ['valor_total']), use_container_width=True)
 
             # =========================================================
-            # 🔎 Auditoria por guia e 🧩 Comparar/remover duplicadas
+            # Auditoria por guia e Comparar/remover duplicadas (com keys únicas)
             # =========================================================
             with st.expander("🔎 Auditoria por guia (opcional)"):
-                arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
-                if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
+                arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados], key="auditoria_select")
+                if st.button("Gerar auditoria do arquivo selecionado", type="primary", key="auditoria_btn"):
                     escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
                     if escolhido is not None:
                         if hasattr(escolhido, "seek"):
@@ -544,11 +468,11 @@ with tab1:
                             if c in df_a_disp.columns:
                                 df_a_disp[c] = df_a_disp[c].apply(format_currency_br)
                         st.dataframe(df_a_disp, use_container_width=True)
-                        st.download_button("Baixar auditoria (CSV)", df_a.to_csv(index=False).encode('utf-8'), file_name=f"auditoria_{arquivo_escolhido}.csv", mime="text/csv")
+                        st.download_button("Baixar auditoria (CSV)", df_a.to_csv(index=False).encode('utf-8'), file_name=f"auditoria_{arquivo_escolhido}.csv", mime="text/csv", key="auditoria_download")
 
             with st.expander("🧩 Comparar XML e remover guias duplicadas"):
                 arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados], key="comparar_select")
-                if st.button("Remover guias duplicadas do arquivo base", type="primary"):
+                if st.button("Remover guias duplicadas do arquivo base", type="primary", key="comparar_btn"):
                     base_file = next((f for f in files if f.name == arquivo_base), None)
                     outros_files = [f for f in files if f.name != arquivo_base]
 
@@ -624,7 +548,7 @@ with tab1:
                             buffer_xml = io.BytesIO()
                             tree.write(buffer_xml, encoding="utf-8", xml_declaration=True, pretty_print=True)
 
-                            st.download_button("Baixar XML sem duplicadas", data=buffer_xml.getvalue(), file_name=f"{arquivo_base.replace('.xml','')}_sem_duplicadas.xml", mime="application/xml")
+                            st.download_button("Baixar XML sem duplicadas", data=buffer_xml.getvalue(), file_name=f"{arquivo_base.replace('.xml','')}_sem_duplicadas.xml", mime="application/xml", key="comparar_download")
                     
                 arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
                 if st.button("Gerar auditoria do arquivo selecionado", type="primary"):
