@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 # Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-__version__ = "2026.01.15-ptbr-06"
+__version__ = "2026.01.15-ptbr-07"
 
 
 class TissParsingError(Exception):
@@ -318,7 +318,7 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     """
     Uma linha por guia:
       - Para RECURSO: numeroGuiaOrigem, numeroGuiaOperadora, senha,
-                      codGlosaGuia, justificativa_prefix, numeroLote, protocolo.
+                      codGlosaGuia, justificativa_prefix, numero_lote, protocolo.
       - Para CONSULTA: numeroGuiaPrestador e valor (valorProcedimento).
       - Para SADT: numeroGuiaPrestador, total_tag (valorTotalGeral),
                    subtotais por itens e soma (procedimentos/outras).
@@ -339,6 +339,13 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     out: List[Dict] = []
 
+    # Tenta capturar numero_lote para registrar nas linhas de auditoria
+    numero_lote_for_audit = ""
+    try:
+        numero_lote_for_audit = _get_numero_lote(root)
+    except Exception:
+        numero_lote_for_audit = ""
+
     # RECURSO
     if _is_recurso(root):
         base = './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa'
@@ -353,13 +360,14 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             out.append({
                 'arquivo': arquivo_nome,
                 'tipo': 'RECURSO',
-                'numeroLote': lote,
+                'numero_lote': (lote or numero_lote_for_audit or ''),
                 'protocolo': protocolo,
                 'numeroGuiaOrigem': num_origem,
                 'numeroGuiaOperadora': num_oper,
                 'senha': senha,
                 'codGlosaGuia': cod_glosa,
                 'justificativa_prefix': (just[:250] + '…') if just else '',
+                'parser_version': __version__,
             })
         return out
 
@@ -377,6 +385,8 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
                 'subtotal_itens_proc': v,
                 'subtotal_itens_outras': Decimal('0'),
                 'subtotal_itens': v,
+                'numero_lote': numero_lote_for_audit,
+                'parser_version': __version__,
             })
         return out
 
@@ -397,5 +407,7 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             'subtotal_itens_proc': proc,
             'subtotal_itens_outras': outras,
             'subtotal_itens': proc + outras,
+            'numero_lote': numero_lote_for_audit,
+            'parser_version': __version__,
         })
     return out
