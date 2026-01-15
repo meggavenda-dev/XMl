@@ -1,113 +1,139 @@
 
-# file: app.py
-import io
-from pathlib import Path
+# file: tiss_parser.py
 from decimal import Decimal
-import pandas as pd
-import streamlit as st
-from tiss_parser import parse_tiss_xml, parse_many_xmls
+from pathlib import Path
+import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Leitor TISS XML", layout="wide")
+ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-st.title("Leitor de XML TISS (Consulta e SP‑SADT)")
-st.caption("Extrai nº do lote, quantidade de guias e valor total por arquivo.")
+class TissParsingError(Exception):
+    pass
 
-tab1, tab2 = st.tabs(["Upload de XML(s)", "Ler de uma pasta local (clonada do GitHub)"])
+def _dec(txt: str | None) -> Decimal:
+    """Converte string numérica do XML em Decimal; vazio/None => Decimal(0)."""
+    if not txt:
+        return Decimal('0')
+    return Decimal(txt.strip().replace(',', '.'))  # por segurança se algum vier com vírgula
 
-def _df_format(df: pd.DataFrame) -> pd.DataFrame:
-    # Garante tipos e formatação
-    if 'valor_total' in df.columns:
-        df['valor_total'] = df['valor_total'].apply(lambda x: float(Decimal(str(x))))
-    ordenar = ['numero_lote', 'tipo', 'qtde_guias', 'valor_total', 'arquivo']
-    cols = [c for c in ordenar if c in df.columns] + [c for c in df.columns if c not in ordenar]
-    return df[cols].sort_values(['numero_lote', 'tipo', 'arquivo'], ignore_index=True)
+def _is_consulta(root: ET.Element) -> bool:
+    return root.find('.//ans:guiaConsulta', ANS_NS) is not None
 
-with tab1:
-    files = st.file_uploader(
-        "Selecione um ou mais arquivos XML TISS",
-        type=['xml'],
-        accept_multiple_files=True
-    )
-    if files:
-        resultados = []
-        for f in files:
-            data = f.read()
-            # salvar em buffer para o parser do ElementTree
-            tmp_path = Path(f.name)
-            # ET aceita file-like; faremos via bytesIO para não gravar em disco:
-            buff = io.BytesIO(data)
-            try:
-                import xml.etree.ElementTree as ET
-                root = ET.parse(buff).getroot()
-                # reaproveita núcleo de parsing: precisamos de um arquivo físico?
-                # Para não duplicar lógica, vamos serializar temporariamente em memória:
-                # Truque: escrever num NamedTemporaryFile se desejar, mas aqui
-                # vamos adaptar parse_tiss_xml para receber root? Para simplificar,
-                # reusamos o código do parser diretamente (copie a função se preferir).
-            except Exception as e:
-                st.error(f"Falha ao ler {f.name}: {e}")
-                continue
+def _get_numero_lote(root: ET.Element) -> str:
+    el = root.find('.//ans:prestadorParaOperadora/ans:loteGuias/ans:numeroLote', ANS_NS)
+    if el is None or not (txt := el.text):
+        raise TissParsingError('numeroLote não encontrado no XML.')
+    return txt.strip()
 
-            # Chamar parse_tiss_xml direto requer caminho; então criamos um arquivo temporário:
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".xml", delete=True) as tmp:
-                tmp.write(data)
-                tmp.flush()
-                try:
-                    res = parse_tiss_xml(tmp.name)
-                    res['arquivo'] = f.name  # exibe o nome original do upload
-                except Exception as e:
-                    res = {'arquivo': f.name, 'numero_lote': '', 'tipo': 'DESCONHECIDO',
-                           'qtde_guias': 0, 'valor_total': Decimal('0'), 'erro': str(e)}
-                resultados.append(res)
+def _sum_consulta(root: ET.Element) -> tuple[int, Decimal]:
+    """
+    Para guias de CONSULTA, soma ans:procedimento/ans:valorProcedimento de cada ans:guiaConsulta.
+    Retorna (qtde_guias, total).
+    """
+    total = Decimal('0')
+    guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaConsulta', ANS_NS)
+    for g in guias:
+        val_el = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
+        total += _dec(val_el.text if val_el is not None else None)
+    return len(guias), total
 
-        if resultados:
-            df = pd.DataFrame(resultados)
-            df = _df_format(df)
-            st.subheader("Resumo por arquivo")
-            st.dataframe(df, use_container_width=True)
+def _sum_sadt_by_total(guia: ET.Element) -> Decimal:
+    """
+    Tenta usar ans:valorTotal/ans:valorTotalGeral por guia SP-SADT.
+    """
+    vt = guia.find('.//ans:valorTotal', ANS_NS)
+    if vt is None:
+        return Decimal('0')
+    vtg = vt.find('ans:valorTotalGeral', ANS_NS)
+    return _dec(vtg.text if vtg is not None else None)
 
-            st.download_button(
-                "Baixar resumo (CSV)",
-                df.to_csv(index=False).encode('utf-8'),
-                file_name="resumo_xml_tiss.csv",
-                mime="text/csv"
-            )
+def _sum_sadt_by_items(guia: ET.Element) -> Decimal:
+    """
+    Fallback: reconstrói total por guia SP-SADT somando:
+      - valorProcedimentos (quando presente)
+      - outrasDespesas (materiais, medicamentos, taxas/aluguéis, diárias, gases)
+    Se algum campo não existir, soma do que existir.
+    """
+    total = Decimal('0')
 
-with tab2:
-    pasta = st.text_input(
-        "Caminho da pasta com XMLs (ex.: ./data ou C:\\\\repos\\\\tiss-xmls)",
-        value="./data"
-    )
-    if st.button("Ler pasta"):
-        p = Path(pasta)
-        if not p.exists():
-            st.error("Pasta não encontrada.")
-        else:
-            xmls = list(p.glob("*.xml"))
-            if not xmls:
-                st.warning("Nenhum .xml encontrado nessa pasta.")
-            else:
-                resultados = parse_many_xmls(xmls)
-                df = pd.DataFrame(resultados)
-                df = _df_format(df)
+    # 1) valorTotal/valorProcedimentos e afins (se existir o bloco valorTotal)
+    vt = guia.find('.//ans:valorTotal', ANS_NS)
+    if vt is not None:
+        for tag in ('valorProcedimentos', 'valorDiarias', 'valorTaxasAlugueis',
+                    'valorMateriais', 'valorMedicamentos', 'valorGasesMedicinais'):
+            el = vt.find(f'ans:{tag}', ANS_NS)
+            total += _dec(el.text if el is not None else None)
 
-                st.subheader("Resumo por arquivo")
-                st.dataframe(df, use_container_width=True)
+    # 2) Se o provedor não preencheu "valorTotal" mas detalhou "outrasDespesas/ despesa/ servicosExecutados"
+    #    ainda assim vamos tentar somar itens (valorTotal do item).
+    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
+        sv = desp.find('ans:servicosExecutados', ANS_NS)
+        if sv is None: 
+            continue
+        el_val = sv.find('ans:valorTotal', ANS_NS)
+        total += _dec(el_val.text if el_val is not None else None)
 
-                # Agregação por nº do lote (útil se houver mais de um arquivo do mesmo lote)
-                st.subheader("Agregado por nº do lote")
-                agg = df.groupby(['numero_lote', 'tipo'], dropna=False, as_index=False).agg(
-                    qtde_arquivos=('arquivo', 'count'),
-                    qtde_guias_total=('qtde_guias', 'sum'),
-                    valor_total=('valor_total', 'sum')
-                )
-                st.dataframe(agg, use_container_width=True)
+    return total
 
-                st.download_button(
-                    "Baixar resumo (CSV)",
-                    df.to_csv(index=False).encode('utf-8'),
-                    file_name="resumo_xml_tiss.csv",
-                    mime="text/csv"
-                )
+def _sum_sadt(root: ET.Element) -> tuple[int, Decimal]:
+    """
+    Para guias SP-SADT: tenta primeiro valorTotalGeral; se não existir,
+    reconstrói pelos itens/valorTotal.
+    Retorna (qtde_guias, total).
+    """
+    total = Decimal('0')
+    guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaSP-SADT', ANS_NS)
+    for g in guias:
+        v = _sum_sadt_by_total(g)
+        if v == 0:
+            v = _sum_sadt_by_items(g)
+        total += v
+    return len(guias), total
 
+def parse_tiss_xml(path: str | Path) -> dict:
+    """
+    Lê um XML TISS (Consulta ou SP-SADT) e retorna:
+    {
+      'arquivo': '...xml',
+      'numero_lote': '9148401',
+      'tipo': 'CONSULTA'|'SADT',
+      'qtde_guias': 19,
+      'valor_total': Decimal('12198.38')
+    }
+    """
+    path = Path(path)
+    root = ET.parse(path).getroot()
+
+    numero_lote = _get_numero_lote(root)
+    if _is_consulta(root):
+        tipo = 'CONSULTA'
+        n_guias, total = _sum_consulta(root)
+    else:
+        tipo = 'SADT'
+        n_guias, total = _sum_sadt(root)
+
+    return {
+        'arquivo': path.name,
+        'numero_lote': numero_lote,
+        'tipo': tipo,
+        'qtde_guias': n_guias,
+        'valor_total': total
+    }
+
+def parse_many_xmls(paths: list[str | Path]) -> list[dict]:
+    """
+    Processa vários XMLs e retorna uma lista de dicionários como parse_tiss_xml().
+    """
+    resultados = []
+    for p in paths:
+        try:
+            resultados.append(parse_tiss_xml(p))
+        except Exception as e:
+            resultados.append({
+                'arquivo': Path(p).name,
+                'numero_lote': '',
+                'tipo': 'DESCONHECIDO',
+                'qtde_guias': 0,
+                'valor_total': Decimal('0'),
+                'erro': str(e)
+            })
+    return resultados
