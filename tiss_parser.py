@@ -1,7 +1,10 @@
 
 # file: tiss_parser.py
+from __future__ import annotations
+
 from decimal import Decimal
 from pathlib import Path
+from typing import IO, Union, List, Dict
 import xml.etree.ElementTree as ET
 
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
@@ -10,10 +13,13 @@ class TissParsingError(Exception):
     pass
 
 def _dec(txt: str | None) -> Decimal:
-    """Converte string numérica do XML em Decimal; vazio/None => Decimal(0)."""
+    """
+    Converte string numérica do XML em Decimal; vazio/None => Decimal(0).
+    Também troca ',' por '.' por segurança.
+    """
     if not txt:
         return Decimal('0')
-    return Decimal(txt.strip().replace(',', '.'))  # por segurança se algum vier com vírgula
+    return Decimal(txt.strip().replace(',', '.'))
 
 def _is_consulta(root: ET.Element) -> bool:
     return root.find('.//ans:guiaConsulta', ANS_NS) is not None
@@ -26,8 +32,7 @@ def _get_numero_lote(root: ET.Element) -> str:
 
 def _sum_consulta(root: ET.Element) -> tuple[int, Decimal]:
     """
-    Para guias de CONSULTA, soma ans:procedimento/ans:valorProcedimento de cada ans:guiaConsulta.
-    Retorna (qtde_guias, total).
+    Para CONSULTA: soma ans:procedimento/ans:valorProcedimento por ans:guiaConsulta.
     """
     total = Decimal('0')
     guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaConsulta', ANS_NS)
@@ -38,7 +43,7 @@ def _sum_consulta(root: ET.Element) -> tuple[int, Decimal]:
 
 def _sum_sadt_by_total(guia: ET.Element) -> Decimal:
     """
-    Tenta usar ans:valorTotal/ans:valorTotalGeral por guia SP-SADT.
+    Primeiro tenta usar valorTotal/valorTotalGeral por guia SP-SADT.
     """
     vt = guia.find('.//ans:valorTotal', ANS_NS)
     if vt is None:
@@ -48,14 +53,12 @@ def _sum_sadt_by_total(guia: ET.Element) -> Decimal:
 
 def _sum_sadt_by_items(guia: ET.Element) -> Decimal:
     """
-    Fallback: reconstrói total por guia SP-SADT somando:
-      - valorProcedimentos (quando presente)
-      - outrasDespesas (materiais, medicamentos, taxas/aluguéis, diárias, gases)
-    Se algum campo não existir, soma do que existir.
+    Fallback: reconstrói total somando:
+      - valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais, valorMedicamentos, valorGasesMedicinais
+      - e, se houver, outrasDespesas/despesa/servicosExecutados/valorTotal (item a item)
     """
     total = Decimal('0')
 
-    # 1) valorTotal/valorProcedimentos e afins (se existir o bloco valorTotal)
     vt = guia.find('.//ans:valorTotal', ANS_NS)
     if vt is not None:
         for tag in ('valorProcedimentos', 'valorDiarias', 'valorTaxasAlugueis',
@@ -63,11 +66,9 @@ def _sum_sadt_by_items(guia: ET.Element) -> Decimal:
             el = vt.find(f'ans:{tag}', ANS_NS)
             total += _dec(el.text if el is not None else None)
 
-    # 2) Se o provedor não preencheu "valorTotal" mas detalhou "outrasDespesas/ despesa/ servicosExecutados"
-    #    ainda assim vamos tentar somar itens (valorTotal do item).
     for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
         sv = desp.find('ans:servicosExecutados', ANS_NS)
-        if sv is None: 
+        if sv is None:
             continue
         el_val = sv.find('ans:valorTotal', ANS_NS)
         total += _dec(el_val.text if el_val is not None else None)
@@ -76,9 +77,7 @@ def _sum_sadt_by_items(guia: ET.Element) -> Decimal:
 
 def _sum_sadt(root: ET.Element) -> tuple[int, Decimal]:
     """
-    Para guias SP-SADT: tenta primeiro valorTotalGeral; se não existir,
-    reconstrói pelos itens/valorTotal.
-    Retorna (qtde_guias, total).
+    Para SP-SADT: tenta valorTotalGeral; se não houver, soma itens/outrasDespesas.
     """
     total = Decimal('0')
     guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaSP-SADT', ANS_NS)
@@ -89,20 +88,7 @@ def _sum_sadt(root: ET.Element) -> tuple[int, Decimal]:
         total += v
     return len(guias), total
 
-def parse_tiss_xml(path: str | Path) -> dict:
-    """
-    Lê um XML TISS (Consulta ou SP-SADT) e retorna:
-    {
-      'arquivo': '...xml',
-      'numero_lote': '9148401',
-      'tipo': 'CONSULTA'|'SADT',
-      'qtde_guias': 19,
-      'valor_total': Decimal('12198.38')
-    }
-    """
-    path = Path(path)
-    root = ET.parse(path).getroot()
-
+def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
     numero_lote = _get_numero_lote(root)
     if _is_consulta(root):
         tipo = 'CONSULTA'
@@ -112,24 +98,47 @@ def parse_tiss_xml(path: str | Path) -> dict:
         n_guias, total = _sum_sadt(root)
 
     return {
-        'arquivo': path.name,
+        'arquivo': arquivo_nome,
         'numero_lote': numero_lote,
         'tipo': tipo,
         'qtde_guias': n_guias,
         'valor_total': total
     }
 
-def parse_many_xmls(paths: list[str | Path]) -> list[dict]:
+def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
     """
-    Processa vários XMLs e retorna uma lista de dicionários como parse_tiss_xml().
+    Lê um XML TISS a partir de caminho (str/Path) OU arquivo (IO[bytes]/BytesIO).
+    Retorna:
+    {
+      'arquivo': '...xml',
+      'numero_lote': '9148401',
+      'tipo': 'CONSULTA'|'SADT',
+      'qtde_guias': 19,
+      'valor_total': Decimal('12198.38')
+    }
     """
-    resultados = []
+    # Se for file-like (tem .read), usamos ET.parse direto
+    if hasattr(source, 'read'):
+        root = ET.parse(source).getroot()
+        arquivo_nome = getattr(source, 'name', 'upload.xml')
+        return _parse_root(root, Path(arquivo_nome).name)
+
+    # Caso contrário, tratamos como caminho
+    path = Path(source)
+    root = ET.parse(path).getroot()
+    return _parse_root(root, path.name)
+
+def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
+    """
+    Processa vários XMLs (caminhos) e retorna lista de dicionários (parse_tiss_xml()).
+    """
+    resultados: List[Dict] = []
     for p in paths:
         try:
             resultados.append(parse_tiss_xml(p))
         except Exception as e:
             resultados.append({
-                'arquivo': Path(p).name,
+                'arquivo': Path(p).name if hasattr(p, 'name') else str(p),
                 'numero_lote': '',
                 'tipo': 'DESCONHECIDO',
                 'qtde_guias': 0,
