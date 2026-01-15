@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 # Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-__version__ = "2026.01.15-ptbr-05"
+__version__ = "2026.01.15-ptbr-06"
 
 
 class TissParsingError(Exception):
@@ -225,7 +225,9 @@ def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
             'numero_lote': numero_lote,
             'tipo': 'RECURSO',
             'qtde_guias': n_guias,
-            'valor_total': total,
+            'valor_total': total,               # valor recursado (no contexto de recurso)
+            'valor_glosado': Decimal('0'),      # preencher via Demonstrativo
+            'valor_liberado': Decimal('0'),     # preencher via Demonstrativo
             'estrategia_total': estrategia,
             'parser_version': __version__,
         }
@@ -241,7 +243,9 @@ def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
             'numero_lote': numero_lote,
             'tipo': 'CONSULTA',
             'qtde_guias': n_guias,
-            'valor_total': total,
+            'valor_total': total,               # valor APRESENTADO
+            'valor_glosado': Decimal('0'),      # preencher via Demonstrativo
+            'valor_liberado': Decimal('0'),     # preencher via Demonstrativo
             'estrategia_total': estrategia,
             'parser_version': __version__,
         }
@@ -254,7 +258,9 @@ def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
         'numero_lote': numero_lote,
         'tipo': tipo,
         'qtde_guias': n_guias,
-        'valor_total': total,
+        'valor_total': total,                   # valor APRESENTADO
+        'valor_glosado': Decimal('0'),          # preencher via Demonstrativo
+        'valor_liberado': Decimal('0'),         # preencher via Demonstrativo
         'estrategia_total': estrategia,
         'parser_version': __version__,
     }
@@ -296,6 +302,8 @@ def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
                 'tipo': 'DESCONHECIDO',
                 'qtde_guias': 0,
                 'valor_total': Decimal('0'),
+                'valor_glosado': Decimal('0'),
+                'valor_liberado': Decimal('0'),
                 'estrategia_total': 'erro',
                 'parser_version': __version__,
                 'erro': str(e),
