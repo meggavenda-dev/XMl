@@ -33,18 +33,12 @@ def _to_float(val) -> float:
         return 0.0
 
 def _df_format(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Garantia de tipos e ordenação para exibição/CSV.
-    Acrescenta coluna 'suspeito' quando qtde_guias>0 e valor_total==0.
-    """
     if 'valor_total' in df.columns:
         df['valor_total'] = df['valor_total'].apply(_to_float)
     if 'qtde_guias' in df.columns and 'valor_total' in df.columns:
         df['suspeito'] = (df['qtde_guias'] > 0) & (df['valor_total'] == 0)
     else:
         df['suspeito'] = False
-
-    # Se erro não existir, cria coluna nula para facilitar exibição
     if 'erro' not in df.columns:
         df['erro'] = None
 
@@ -65,43 +59,22 @@ def _make_agg(df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 def _download_excel_button(df_resumo: pd.DataFrame, df_agg: pd.DataFrame, df_auditoria: pd.DataFrame, label: str):
-    """
-    Gera um Excel em memória com abas:
-      - Resumo por arquivo
-      - Agregado por lote
-      - Auditoria (com estrategia_total e suspeito)
-    """
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        (df_resumo if not df_resumo.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="Resumo por arquivo"
-        )
-        (df_agg if not df_agg.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="Agregado por lote"
-        )
-        (df_auditoria if not df_auditoria.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="Auditoria"
-        )
-    st.download_button(
-        label,
-        data=buffer.getvalue(),
-        file_name="resumo_xml_tiss.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        (df_resumo if not df_resumo.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Resumo por arquivo")
+        (df_agg if not df_agg.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Agregado por lote")
+        (df_auditoria if not df_auditoria.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Auditoria")
+    st.download_button(label, data=buffer.getvalue(), file_name="resumo_xml_tiss.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 def _auditar_alertas(df: pd.DataFrame) -> None:
-    """
-    Emite alertas de auditoria visual (suspeitos e erros).
-    """
     if df.empty:
         return
     sus = df[df['suspeito']]
     err = df[df['erro'].notna()] if 'erro' in df.columns else pd.DataFrame()
-
     if not sus.empty:
         st.warning(f"⚠️ {len(sus)} arquivo(s) com valor_total=0 e qtde_guias>0. Verifique: " +
                    ", ".join(sus['arquivo'].tolist())[:500])
-
     if not err.empty:
         st.error(f"❌ {len(err)} arquivo(s) com erro no parsing. Exemplos: " +
                  ", ".join(err['arquivo'].head(5).tolist()))
@@ -110,20 +83,15 @@ def _auditar_alertas(df: pd.DataFrame) -> None:
 # Upload
 # ----------------------------
 with tab1:
-    files = st.file_uploader(
-        "Selecione um ou mais arquivos XML TISS",
-        type=['xml'],
-        accept_multiple_files=True
-    )
+    files = st.file_uploader("Selecione um ou mais arquivos XML TISS", type=['xml'], accept_multiple_files=True)
     if files:
         resultados: List[Dict] = []
         for f in files:
             try:
-                # Passa UploadedFile (file-like) direto para o parser
                 if hasattr(f, "seek"):
                     f.seek(0)
                 res = parse_tiss_xml(f)
-                res['arquivo'] = f.name  # mostra o nome original do upload
+                res['arquivo'] = f.name
                 if 'erro' not in res:
                     res['erro'] = None
             except Exception as e:
@@ -154,12 +122,8 @@ with tab1:
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.download_button(
-                    "Baixar resumo (CSV)",
-                    df.to_csv(index=False).encode('utf-8'),
-                    file_name="resumo_xml_tiss.csv",
-                    mime="text/csv"
-                )
+                st.download_button("Baixar resumo (CSV)", df.to_csv(index=False).encode('utf-8'),
+                                   file_name="resumo_xml_tiss.csv", mime="text/csv")
             with col2:
                 _download_excel_button(df, agg, df, "Baixar resumo (Excel .xlsx)")
             with col3:
@@ -168,33 +132,26 @@ with tab1:
             with st.expander("🔎 Auditoria por guia (opcional)"):
                 arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados])
                 if st.button("Gerar auditoria do arquivo selecionado"):
-                    # recupera UploadedFile correspondente
                     escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
                     if escolhido is not None:
                         if hasattr(escolhido, "seek"):
                             escolhido.seek(0)
                         linhas = audit_por_guia(escolhido)
                         df_a = pd.DataFrame(linhas)
-                        # Converte Decimals para float para exibição
-                        for c in ('total_tag', 'subtotal_itens'):
+                        for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
                             if c in df_a.columns:
                                 df_a[c] = df_a[c].apply(_to_float)
                         st.dataframe(df_a, use_container_width=True)
-                        st.download_button(
-                            "Baixar auditoria (CSV)",
-                            df_a.to_csv(index=False).encode('utf-8'),
-                            file_name=f"auditoria_{arquivo_escolhido}.csv",
-                            mime="text/csv"
-                        )
+                        st.download_button("Baixar auditoria (CSV)",
+                                           df_a.to_csv(index=False).encode('utf-8'),
+                                           file_name=f"auditoria_{arquivo_escolhido}.csv",
+                                           mime="text/csv")
 
 # ----------------------------
-# Pasta local (útil para rodar local/clonado)
+# Pasta local
 # ----------------------------
 with tab2:
-    pasta = st.text_input(
-        "Caminho da pasta com XMLs (ex.: ./data ou C:\\repos\\tiss-xmls)",
-        value="./data"
-    )
+    pasta = st.text_input("Caminho da pasta com XMLs (ex.: ./data ou C:\\repos\\tiss-xmls)", value="./data")
     if st.button("Ler pasta"):
         p = Path(pasta)
         if not p.exists():
@@ -219,12 +176,8 @@ with tab2:
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.download_button(
-                        "Baixar resumo (CSV)",
-                        df.to_csv(index=False).encode('utf-8'),
-                        file_name="resumo_xml_tiss.csv",
-                        mime="text/csv"
-                    )
+                    st.download_button("Baixar resumo (CSV)", df.to_csv(index=False).encode('utf-8'),
+                                       file_name="resumo_xml_tiss.csv", mime="text/csv")
                 with col2:
                     _download_excel_button(df, agg, df, "Baixar resumo (Excel .xlsx)")
                 with col3:
