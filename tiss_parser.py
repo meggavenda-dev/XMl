@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 # Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 
-__version__ = "2026.01.15-ptbr-04"
+__version__ = "2026.01.15-ptbr-05"
 
 class TissParsingError(Exception):
     pass
@@ -27,11 +27,37 @@ def _dec(txt: str | None) -> Decimal:
 def _is_consulta(root: ET.Element) -> bool:
     return root.find('.//ans:guiaConsulta', ANS_NS) is not None
 
+def _is_sadt(root: ET.Element) -> bool:
+    return root.find('.//ans:guiaSP-SADT', ANS_NS) is not None
+
+def _is_recurso(root: ET.Element) -> bool:
+    """RECURSO_GLOSA identificado pelo tipoTransacao ou pela estrutura de recurso."""
+    tipo = root.findtext('.//ans:cabecalho/ans:identificacaoTransacao/ans:tipoTransacao', namespaces=ANS_NS)
+    if (tipo or '').strip().upper() == 'RECURSO_GLOSA':
+        return True
+    return root.find('.//ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa', ANS_NS) is not None
+
 def _get_numero_lote(root: ET.Element) -> str:
+    """
+    Tenta extrair numeroLote para:
+      - Lote de guias (Consulta / SADT)
+      - Recurso de glosa (guiaRecursoGlosa/numeroLote)
+    """
+    # 1) Consulta/SADT: dentro de loteGuias
     el = root.find('.//ans:prestadorParaOperadora/ans:loteGuias/ans:numeroLote', ANS_NS)
-    if el is None or not (txt := el.text):
-        raise TissParsingError('numeroLote não encontrado no XML.')
-    return txt.strip()
+    if el is not None and el.text and el.text.strip():
+        return el.text.strip()
+
+    # 2) Recurso de glosa: dentro de guiaRecursoGlosa
+    el = root.find('.//ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa/ans:numeroLote', ANS_NS)
+    if el is not None and el.text and el.text.strip():
+        return el.text.strip()
+
+    raise TissParsingError('numeroLote não encontrado no XML.')
+
+def _get_text(root: ET.Element, xpath: str) -> str:
+    el = root.find(xpath, ANS_NS)
+    return (el.text or '').strip() if el is not None and el.text else ''
 
 # ----------------------------
 # CONSULTA
@@ -74,11 +100,11 @@ def _sum_itens_outras_desp(guia: ET.Element) -> Decimal:
 def _sum_componentes_valorTotal(guia: ET.Element) -> Decimal:
     """
     Soma os componentes do bloco valorTotal da guia:
-    valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais, valorMedicamentos, valorGasesMedicinais
+    valorProcedimentos, valorDiarias, valorTaxasAlugueis, valorMateriais,
+    valorMedicamentos, valorGasesMedicinais
     """
     total = Decimal('0')
-    # IMPORTANTE: buscar o bloco da guia diretamente (sem //)
-    vt = guia.find('ans:valorTotal', ANS_NS)
+    vt = guia.find('ans:valorTotal', ANS_NS)  # bloco da guia
     if vt is None:
         return Decimal('0')
     for tag in ('valorProcedimentos', 'valorDiarias', 'valorTaxasAlugueis',
@@ -94,7 +120,7 @@ def _sum_sadt_guia(guia: ET.Element) -> tuple[Decimal, str]:
       2) Se não houver/for 0, reconstrói preferindo ITENS (procedimentos + outras despesas).
          Se itens vierem 0 mas componentes existirem, usa componentes.
     """
-    # 1) Bloco valorTotal (da guia) sem // para evitar pegar item
+    # 1) Bloco valorTotal (da guia) sem // para não pegar item
     vt = guia.find('ans:valorTotal', ANS_NS)
     if vt is not None:
         vtg = vt.find('ans:valorTotalGeral', ANS_NS)
@@ -102,11 +128,10 @@ def _sum_sadt_guia(guia: ET.Element) -> tuple[Decimal, str]:
         if vtg_val > 0:
             return vtg_val, 'valorTotalGeral'
 
-    # 2) Reconstrução
+    # 2) Reconstrução por itens
     proc_itens  = _sum_itens_procedimentos(guia)
     outras_itens = _sum_itens_outras_desp(guia)
     itens_total = proc_itens + outras_itens
-
     if itens_total > 0:
         return itens_total, 'itens (proced+outras)'
 
@@ -133,21 +158,64 @@ def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
     if len(estrategias) == 1:
         estrategia_arquivo = next(iter(estrategias.keys()))
     else:
-        estrategia_arquivo = "misto: " + ", ".join(f"{k}={v}" for k, v in sorted(estrategias.items(), key=lambda x: (-x[1], x[0])))
+        estrategia_arquivo = "misto: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(estrategias.items(), key=lambda x: (-x[1], x[0]))
+        )
 
     return len(guias), total, estrategia_arquivo
+
+# ----------------------------
+# RECURSO DE GLOSA
+# ----------------------------
+def _sum_recurso(root: ET.Element) -> tuple[int, Decimal, str, str]:
+    """
+    Recurso de glosa:
+      - qtde_guias = quantidade de 'recursoGuia'
+      - valor_total = 'valorTotalRecursado' (do bloco guiaRecursoGlosa)
+      - protocolo = 'numeroProtocolo' (do bloco guiaRecursoGlosa)
+      - estratégia = 'recurso_valorTotalRecursado'
+    """
+    # caminho base do recurso
+    base = './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa'
+    # contagem de guias recursadas
+    qtde_guias = len(root.findall(f'{base}/ans:opcaoRecurso/ans:recursoGuia', ANS_NS))
+    # valor total recursado
+    vtot_txt = _get_text(root, f'{base}/ans:valorTotalRecursado')
+    valor_total = _dec(vtot_txt)
+    # numero do protocolo
+    protocolo = _get_text(root, f'{base}/ans:numeroProtocolo') or ''
+    return qtde_guias, valor_total, 'recurso_valorTotalRecursado', protocolo
 
 # ----------------------------
 # API pública
 # ----------------------------
 def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
     numero_lote = _get_numero_lote(root)
+
+    if _is_recurso(root):
+        tipo = 'RECURSO'
+        n_guias, total, estrategia, protocolo = _sum_recurso(root)
+        out = {
+            'arquivo': arquivo_nome,
+            'numero_lote': numero_lote,
+            'tipo': tipo,
+            'qtde_guias': n_guias,
+            'valor_total': total,
+            'estrategia_total': estrategia,
+            'parser_version': __version__,
+        }
+        # Campo extra (só para RECURSO). Mantém compatibilidade para os demais.
+        if protocolo:
+            out['protocolo'] = protocolo
+        return out
+
     if _is_consulta(root):
         tipo = 'CONSULTA'
         n_guias, total, estrategia = _sum_consulta(root)
     else:
-        tipo = 'SADT'
-        n_guias, total, estrategia = _sum_sadt(root)
+        # default: SADT (quando há guias SADT) ou zero
+        tipo = 'SADT' if _is_sadt(root) else 'DESCONHECIDO'
+        n_guias, total, estrategia = _sum_sadt(root) if tipo == 'SADT' else (0, Decimal('0'), 'zero')
 
     return {
         'arquivo': arquivo_nome,
@@ -162,6 +230,7 @@ def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
 def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
     """
     Lê um XML TISS a partir de caminho (str/Path) OU arquivo (IO[bytes]/BytesIO).
+    Agora com suporte a RECURSO_GLOSA (tipo 'RECURSO').
     """
     if hasattr(source, 'read'):  # UploadedFile/BytesIO
         try:
@@ -200,13 +269,14 @@ def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
 # ----------------------------
 def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     """
-    Uma linha por guia com:
-      - numeroGuiaPrestador
-      - total_tag (valorTotalGeral da guia)
-      - subtotal_itens_proc (soma dos itens de procedimentos)
-      - subtotal_itens_outras (soma dos itens de outrasDespesas)
-      - subtotal_itens (proc + outras)
+    Uma linha por guia:
+      - Para CONSULTA: numeroGuiaPrestador e valor (valorProcedimento).
+      - Para SADT: numeroGuiaPrestador, total_tag (valorTotalGeral da guia),
+                   subtotais por itens e soma.
+      - Para RECURSO: numeroGuiaOrigem, numeroGuiaOperadora, senha,
+                      codGlosaGuia e prefixo da justificativa.
     """
+    # Carregar
     if hasattr(source, 'read'):
         try:
             if hasattr(source, 'seek'):
@@ -221,6 +291,32 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
         arquivo_nome = p.name
 
     out: List[Dict] = []
+
+    # RECURSO
+    if _is_recurso(root):
+        base = './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa'
+        protocolo = _get_text(root, f'{base}/ans:numeroProtocolo')
+        lote = _get_text(root, f'{base}/ans:numeroLote')
+        for rg in root.findall(f'{base}/ans:opcaoRecurso/ans:recursoGuia', ANS_NS):
+            num_origem = _get_text(rg, 'ans:numeroGuiaOrigem')
+            num_oper   = _get_text(rg, 'ans:numeroGuiaOperadora')
+            senha      = _get_text(rg, 'ans:senha')
+            cod_glosa  = _get_text(rg, './/ans:recursoGuiaCompleta/ans:codGlosaGuia')
+            just       = _get_text(rg, './/ans:recursoGuiaCompleta/ans:justificativaGuia')
+            out.append({
+                'arquivo': arquivo_nome,
+                'tipo': 'RECURSO',
+                'numeroLote': lote,
+                'protocolo': protocolo,
+                'numeroGuiaOrigem': num_origem,
+                'numeroGuiaOperadora': num_oper,
+                'senha': senha,
+                'codGlosaGuia': cod_glosa,
+                'justificativa_prefix': (just[:250] + '…') if just else '',
+            })
+        return out
+
+    # CONSULTA
     if _is_consulta(root):
         for g in root.findall('.//ans:guiaConsulta', ANS_NS):
             vp = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
@@ -237,6 +333,7 @@ def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             })
         return out
 
+    # SADT
     for g in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = g.find('.//ans:cabecalhoGuia', ANS_NS)
         num_prest = (cab.find('ans:numeroGuiaPrestador', ANS_NS).text.strip()
