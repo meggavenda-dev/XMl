@@ -526,9 +526,7 @@ with tab1:
                 _download_excel_button(df, agg, baixa if not baixa.empty else df, "Baixar resumo (Excel .xlsx)")
             with col3:
                 st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria/Baixa (moeda BR).")
-
-            with st.expander("🔎 Auditoria por guia (opcional)"):
-                
+            
 
 # =========================================================
 # 🔎 Auditoria por guia (opcional)
