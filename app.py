@@ -433,8 +433,6 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
     return df
 
-
-
 def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     parts = []
     if not demo_files:
@@ -451,27 +449,37 @@ def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
         mapping_info = st.session_state['demo_mappings'].get(fname)
         if mapping_info:
             try:
-                df_ok = ler_demo_itens_pagto_xlsx(
+                df_demo = ler_demo_itens_pagto_xlsx(
                     f,
                     strip_zeros_codes=strip_zeros_codes,
                     manual_map=mapping_info.get('columns'),
                     prefer_sheet=mapping_info.get('sheet')
                 )
-                parts.append(df_ok)
+                # >>>>> ADICIONAR AQUI <<<<<
+                df_demo = tratar_codigo_glosa(df_demo)
+                parts.append(df_demo)
                 continue
             except Exception as e:
                 st.warning(f"Mapeamento salvo para '{fname}' falhou ({e}). Tentando auto-detecção...")
 
         # Tenta auto-detecção
         try:
-            df_auto = ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes)
-            parts.append(df_auto)
+            df_demo = ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes)
+
+            # >>>>> ADICIONAR AQUI <<<<<
+            df_demo = tratar_codigo_glosa(df_demo)
+
+            parts.append(df_demo)
             continue
         except Exception:
-            # Abre o wizard de mapeamento manual
+            # Wizard manual
             with st.expander(f"⚙️ Configurar mapeamento para: {fname}", expanded=True):
                 df_manual = _mapping_wizard_for_demo(f)
                 if df_manual is not None:
+
+                    # >>>>> ADICIONAR AQUI <<<<<
+                    df_manual = tratar_codigo_glosa(df_manual)
+
                     parts.append(df_manual)
                 else:
                     st.error(f"Não foi possível mapear o demonstrativo '{fname}'. Preencha o mapeamento acima.")
@@ -480,7 +488,19 @@ def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
         return pd.concat(parts, ignore_index=True)
     return pd.DataFrame()
 
+def tratar_codigo_glosa(df_demo: pd.DataFrame) -> pd.DataFrame:
+    if 'Código Glosa' not in df_demo.columns:
+        return df_demo
 
+    glosa = df_demo['Código Glosa'].astype(str).fillna('')
+
+    df_demo['motivo_glosa_codigo']    = glosa.str.extract(r'^(\d+)')
+    df_demo['motivo_glosa_descricao'] = glosa.str.extract(r'^\s*\d+\s*-\s*(.*)$')
+
+    df_demo['motivo_glosa_codigo']    = df_demo['motivo_glosa_codigo'].fillna('').str.strip()
+    df_demo['motivo_glosa_descricao'] = df_demo['motivo_glosa_descricao'].fillna('').str.strip()
+
+    return df_demo
 
 def _mapping_wizard_for_demo(uploaded_file) -> Optional[pd.DataFrame]:
     """Exibe UI para mapear colunas do demonstrativo manualmente e retorna o DataFrame já mapeado."""
@@ -557,7 +577,6 @@ def _mapping_wizard_for_demo(uploaded_file) -> Optional[pd.DataFrame]:
     except Exception as e:
         st.error(f"Falha aplicando mapeamento: {e}")
         return None
-
 
 def conciliar_itens(
     df_xml: pd.DataFrame,
@@ -643,7 +662,6 @@ def conciliar_itens(
         'nao_casados': unmatch
     }
 
-
 # =========================================================
 # Auditoria (duplicidade de guia & retorno em dias)
 # =========================================================
@@ -652,7 +670,6 @@ def build_chave_guia(tipo: str, numeroGuiaPrestador: str, numeroGuiaOperadora: s
     if t in ('CONSULTA', 'SADT'):
         return str(numeroGuiaPrestador).strip() if numeroGuiaPrestador else None
     return None  # (Recurso não entra aqui; auditoria baseada em XML de guias assistenciais)
-
 
 def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.DataFrame:
     """Reduz itens → nível guia e audita duplicidade/retorno."""
@@ -728,7 +745,6 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
         base.loc[i, 'status_auditoria'] = " + ".join(status) if status else "OK"
 
     return base
-
 
 # =========================================================
 # UI — Sidebar (parâmetros)
