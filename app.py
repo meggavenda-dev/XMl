@@ -230,15 +230,18 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
-    # NOVA LÓGICA CORRIGIDA:
-    # Primeiro, tenta buscar na raiz da guia (onde está no seu LOTE 91650)
-    numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
-
-    # Se não encontrou na raiz, tenta buscar dentro do cabeçalho (padrão de outros sistemas)
-    if not numero_guia_prest:
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        if cab is not None:
-            numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
+        
+        # --- BLOCO CORRIGIDO E IDENTADO ---
+        # Primeiro, tenta buscar na raiz da guia (onde está no seu LOTE 91650)
+        numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+
+        # Se não encontrou na raiz, tenta buscar dentro do cabeçalho
+        if not numero_guia_prest:
+            if cab is not None:
+                numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
+        # ----------------------------------
+
         numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
