@@ -695,20 +695,29 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     )
     return grp.sort_values('competencia')
 
-def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 500.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 0.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
     base = df_conc.copy()
     if base.empty:
         return base, base
+        
     grp = (base.groupby(['codigo_procedimento','descricao_procedimento'], dropna=False, as_index=False)
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_glosa=('valor_glosa','sum'),
                 valor_pago=('valor_pago','sum'),
-                itens=('arquivo','count')))
-    grp['glosa_pct'] = grp.apply(
-        lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
-    )
-    top_valor = grp.sort_values('valor_glosa', ascending=False).head(topn)
-    top_pct   = grp[grp['valor_apresentado']>=min_apresentado].sort_values('glosa_pct', ascending=False).head(topn)
+                qtd_glosada=('valor_glosa', lambda x: (x > 0).sum()))) # Conta quantas vezes houve glosa
+
+    # FILTRO CRÍTICO: Manter apenas o que de fato teve glosa
+    grp_com_glosa = grp[grp['valor_glosa'] > 0].copy()
+    
+    if grp_com_glosa.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    grp_com_glosa['glosa_pct'] = (grp_com_glosa['valor_glosa'] / grp_com_glosa['valor_apresentado']) * 100
+    
+    # Rankings reais
+    top_valor = grp_com_glosa.sort_values('valor_glosa', ascending=False).head(topn)
+    top_pct = grp_com_glosa[grp_com_glosa['valor_apresentado'] >= min_apresentado].sort_values('glosa_pct', ascending=False).head(topn)
+    
     return top_valor, top_pct
 
 def motivos_glosa(df_conc: pd.DataFrame, competencia: Optional[str] = None) -> pd.DataFrame:
