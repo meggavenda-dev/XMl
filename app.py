@@ -827,197 +827,198 @@ def conciliar_itens(
         "nao_casados": unmatch
     }
 
+
 # =========================================================
-# PARTE 4 — Auditoria de Guias
+# PARTE 4 — Auditoria de Guias (duplicidade, retorno, indicadores)
 # =========================================================
 
 def build_chave_guia(tipo: str, numeroGuiaPrestador: str, numeroGuiaOperadora: str) -> Optional[str]:
     """
-    Define a chave única da guia para auditoria.
-    Prioridade:
-      1) número da guia do Prestador (se existir)
-      2) número da guia da Operadora (fallback)
-    Somente para guias assistenciais (CONSULTA / SADT).
+    Chave única da guia para auditoria (Consulta e SADT).
+    Preferência:
+      1) número da guia do prestador
+      2) número da guia da operadora
     """
-    t = (tipo or '').upper()
-    if t in ('CONSULTA', 'SADT'):
-        guia = str(numeroGuiaPrestador or '').strip() or str(numeroGuiaOperadora or '').strip()
-        return guia if guia else None
-    return None
+    tipo = (tipo or "").upper()
+    if tipo not in ("CONSULTA", "SADT"):
+        return None
+
+    guia = (numeroGuiaPrestador or "").strip() or (numeroGuiaOperadora or "").strip()
+    return guia if guia else None
 
 
 def _parse_dt_series(s: pd.Series) -> pd.Series:
-    """Converte série para datetime usando a função flexível de parsing."""
-    return s.astype(str).map(lambda x: parse_date_flex(x))
+    """Converte valores diversos em datetime, transformando inválidos em NaT."""
+    return pd.to_datetime(s, errors="coerce")
 
 
 def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.DataFrame:
     """
-    Auditoria baseada nos itens do XML (nível guia).
-
-    Regras:
-    - Duplicidade: mesma 'chave_guia' aparecendo em mais de um arquivo e/ou lote.
-    - Retorno: mesmo paciente volta ao mesmo médico dentro de 'prazo_retorno' dias.
-    - Indicadores: quantidade de itens por guia e soma dos valores (valor_total) dos itens.
-
-    Retorna um DataFrame no nível guia com:
-      ['arquivo(s)', 'numero_lote(s)', 'tipo_guia', 'numeroGuiaPrestador', 'numeroGuiaOperadora',
-       'paciente', 'medico', 'data_atendimento', 'itens_na_guia', 'valor_total_xml',
-       'duplicada', 'arquivos_duplicados', 'lotes_duplicados', 'retorno_no_periodo', 'retorno_ref',
-       'status_auditoria']
+    Auditoria por guia:
+      - Duplicidade: mesma chave_guia em mais de um arquivo/lote
+      - Retorno: mesmo paciente com mesmo médico dentro de X dias
+      - Indicadores por guia: quantidade de itens e soma dos valores do XML
     """
+
     if df_xml_itens is None or df_xml_itens.empty:
         return pd.DataFrame()
 
-    # Garante colunas necessárias
-    req_cols = [
-        'arquivo', 'numero_lote', 'tipo_guia',
-        'numeroGuiaPrestador', 'numeroGuiaOperadora',
-        'paciente', 'medico', 'data_atendimento',
-        'valor_total'
+    # colunas necessárias
+    req = [
+        "arquivo", "numero_lote", "tipo_guia",
+        "numeroGuiaPrestador", "numeroGuiaOperadora",
+        "paciente", "medico", "data_atendimento",
+        "valor_total"
     ]
-    for c in req_cols:
+    for c in req:
         if c not in df_xml_itens.columns:
             df_xml_itens[c] = None
 
-    # Parse de data
     df = df_xml_itens.copy()
-    df['data_atendimento_dt'] = _parse_dt_series(df['data_atendimento'])
 
-    # Indicadores por guia (agregando itens)
-    agg = (df.groupby([
-                'tipo_guia', 'numeroGuiaPrestador', 'numeroGuiaOperadora',
-                'paciente', 'medico'
-            ], dropna=False, as_index=False)
-             .agg(
-                 arquivo=('arquivo', lambda x: list(sorted(set(str(a) for a in x if str(a).strip())))),
-                 numero_lote=('numero_lote', lambda x: list(sorted(set(str(a) for a in x if str(a).strip())))),
-                 data_atendimento=('data_atendimento_dt', 'min'),  # primeira data do conjunto
-                 itens_na_guia=('valor_total', 'count'),
-                 valor_total_xml=('valor_total', 'sum'),
-            ))
+    # Converte datas
+    df["data_atendimento_dt"] = _parse_dt_series(df["data_atendimento"])
 
-    # Reconstitui colunas string
-    agg['arquivo(s)'] = agg['arquivo'].map(lambda L: ", ".join(L))
-    agg['numero_lote(s)'] = agg['numero_lote'].map(lambda L: ", ".join(L))
-    agg.drop(columns=['arquivo', 'numero_lote'], inplace=True)
+    # ---------------------------------------------------
+    # 1) Agrega itens → nível guia
+    # ---------------------------------------------------
+    agg = (
+        df.groupby([
+            "tipo_guia",
+            "numeroGuiaPrestador",
+            "numeroGuiaOperadora",
+            "paciente",
+            "medico",
+        ], dropna=False, as_index=False)
+        .agg(
+            arquivo=("arquivo", lambda x: sorted(set(str(a) for a in x if str(a).strip()))),
+            numero_lote=("numero_lote", lambda x: sorted(set(str(a) for a in x if str(a).strip()))),
+            data_atendimento=("data_atendimento_dt", "min"),
+            itens_na_guia=("valor_total", "count"),
+            valor_total_xml=("valor_total", "sum"),
+        )
+    )
 
-    # Monta chave_guia
-    agg['chave_guia'] = agg.apply(
-        lambda r: build_chave_guia(r['tipo_guia'], r['numeroGuiaPrestador'], r['numeroGuiaOperadora']),
+    # transforma listas em texto
+    agg["arquivo(s)"] = agg["arquivo"].apply(lambda L: ", ".join(L))
+    agg["numero_lote(s)"] = agg["numero_lote"].apply(lambda L: ", ".join(L))
+
+    agg.drop(columns=["arquivo", "numero_lote"], inplace=True)
+
+    # ---------------------------------------------------
+    # 2) chave para auditoria
+    # ---------------------------------------------------
+    agg["chave_guia"] = agg.apply(
+        lambda r: build_chave_guia(r["tipo_guia"], r["numeroGuiaPrestador"], r["numeroGuiaOperadora"]),
         axis=1
     )
 
-    # Inicializa flags
-    agg['duplicada'] = False
-    agg['arquivos_duplicados'] = ''
-    agg['lotes_duplicados'] = ''
-    agg['retorno_no_periodo'] = False
-    agg['retorno_ref'] = ''
-    agg['status_auditoria'] = ''
+    # Flags
+    agg["duplicada"] = False
+    agg["arquivos_duplicados"] = ""
+    agg["lotes_duplicados"] = ""
+    agg["retorno_no_periodo"] = False
+    agg["retorno_ref"] = ""
+    agg["status_auditoria"] = ""
 
-    # ---------------------------
-    # 1) DUPLICIDADE POR CHAVE
-    # ---------------------------
-    # Grupos com a mesma chave_guia
-    dup_groups = (agg[agg['chave_guia'].notna()]
-                  .groupby('chave_guia', as_index=False)
-                  .agg(idx=('tipo_guia', lambda _: list(_.index))))
+    # ---------------------------------------------------
+    # 3) DETECÇÃO DE DUPLICIDADE
+    # ---------------------------------------------------
+    for chave, grupo in agg.groupby("chave_guia"):
+        if chave is None or chave == "":
+            continue
 
-    # Mapeia duplicidade: se um mesmo 'chave_guia' tem mais de 1 registro, marca todos como duplicados
-    dup_keys = set()
-    for k, g in agg[agg['chave_guia'].notna()].groupby('chave_guia'):
-        if len(g) > 1:
-            dup_keys.add(k)
-            # Para cada linha do grupo, lista lotes e arquivos dos demais
-            indices = list(g.index)
-            lotes_grupo = g['numero_lote(s)'].tolist()
-            arqs_grupo = g['arquivo(s)'].tolist()
-            for i_idx, i in enumerate(indices):
-                outros_lotes = [l for j, l in enumerate(lotes_grupo) if j != i_idx and l]
-                outros_arqs  = [a for j, a in enumerate(arqs_grupo)  if j != i_idx and a]
-                lotes_dup = sorted(set(", ".join(outros_lotes).split(", "))) if outros_lotes else []
-                arqs_dup  = sorted(set(", ".join(outros_arqs).split(", ")))  if outros_arqs  else []
-                agg.loc[i, 'duplicada'] = True
-                agg.loc[i, 'lotes_duplicados'] = ", ".join([x for x in lotes_dup if x])
-                agg.loc[i, 'arquivos_duplicados'] = ", ".join([x for x in arqs_dup if x])
+        if len(grupo) > 1:
+            # Marca duplicidade
+            idxs = grupo.index.tolist()
+            arquivos = {idx: grupo.loc[idx, "arquivo(s)"] for idx in idxs}
+            lotes = {idx: grupo.loc[idx, "numero_lote(s)"] for idx in idxs}
 
-    # ---------------------------
-    # 2) RETORNO (paciente volta ao mesmo médico em até X dias)
-    # ---------------------------
+            for i in idxs:
+                agg.loc[i, "duplicada"] = True
+                outros_arquivos = {
+                    a for j, a in arquivos.items() if j != i and a
+                }
+                outros_lotes = {
+                    l for j, l in lotes.items() if j != i and l
+                }
+                agg.loc[i, "arquivos_duplicados"] = ", ".join(sorted(outros_arquivos))
+                agg.loc[i, "lotes_duplicados"] = ", ".join(sorted(outros_lotes))
+
+    # ---------------------------------------------------
+    # 4) DETECÇÃO DE RETORNO (paciente + médico)
+    # ---------------------------------------------------
     if prazo_retorno and prazo_retorno > 0:
-        # para acelerar, index por paciente+medico
-        agg['_pac'] = agg['paciente'].fillna('').astype(str).str.strip()
-        agg['_med'] = agg['medico'].fillna('').astype(str).str.strip()
-
-        # caminhamos item a item e vemos outros com mesma dupla paciente/médico
         for i, r in agg.iterrows():
-            if not r['data_atendimento'] or pd.isna(r['data_atendimento']):
+            pac = (r["paciente"] or "").strip()
+            med = (r["medico"] or "").strip()
+            d0 = r["data_atendimento"]
+
+            if not pac or not med or pd.isna(d0):
                 continue
-            pac, med = r['_pac'], r['_med']
-            if not pac or not med:
-                continue
-            # candidatos com mesma dupla, exclui o próprio
-            cand = agg[(agg.index != i) & (agg['_pac'] == pac) & (agg['_med'] == med)]
-            # datas no raio
+
+            candidatos = agg[
+                (agg.index != i)
+                & (agg["paciente"].fillna("").str.strip() == pac)
+                & (agg["medico"].fillna("").str.strip() == med)
+            ]
+
             refs = []
-            for j, rr in cand.iterrows():
-                d0 = r['data_atendimento']
-                dj = rr['data_atendimento']
-                if not dj or pd.isna(dj):
+            for j, rr in candidatos.iterrows():
+                dj = rr["data_atendimento"]
+                if pd.isna(dj):
                     continue
-                if abs((d0 - dj).days) <= int(prazo_retorno):
-                    # monta referência (lote/arquivo/data)
-                    lotes = rr['numero_lote(s)'] or ''
-                    arqs  = rr['arquivo(s)'] or ''
-                    data  = rr['data_atendimento'].strftime('%d/%m/%Y') if isinstance(rr['data_atendimento'], datetime) else str(rr['data_atendimento'])
-                    refs.append(f"{lotes} @ {arqs} @ {data}")
+                if abs((d0 - dj).days) <= prazo_retorno:
+                    ref_data = dj.strftime("%d/%m/%Y") if isinstance(dj, datetime) else str(dj)
+                    refs.append(
+                        f"{rr['numero_lote(s)']} @ {rr['arquivo(s)']} @ {ref_data}"
+                    )
+
             if refs:
-                agg.loc[i, 'retorno_no_periodo'] = True
-                agg.loc[i, 'retorno_ref'] = " | ".join(refs)
+                agg.loc[i, "retorno_no_periodo"] = True
+                agg.loc[i, "retorno_ref"] = " | ".join(refs)
 
-        agg.drop(columns=['_pac', '_med'], inplace=True)
-
-    # ---------------------------
-    # 3) STATUS CONSOLIDADO
-    # ---------------------------
-    def _status_row(r):
+    # ---------------------------------------------------
+    # 5) STATUS AUDITORIA
+    # ---------------------------------------------------
+    def _status(r):
         flags = []
-        if r.get('duplicada'):
-            flags.append('Duplicidade')
-        if r.get('retorno_no_periodo'):
-            flags.append('Retorno')
+        if r["duplicada"]:
+            flags.append("Duplicidade")
+        if r["retorno_no_periodo"]:
+            flags.append("Retorno")
         return " + ".join(flags) if flags else "OK"
 
-    agg['status_auditoria'] = agg.apply(_status_row, axis=1)
+    agg["status_auditoria"] = agg.apply(_status, axis=1)
+
+    # ---------------------------------------------------
+    # 6) FORMATAÇÃO FINAL DE DATAS (PATCH APLICADO)
+    # ---------------------------------------------------
+    def _fmt_date_safe(d):
+        if isinstance(d, datetime):
+            return d.strftime("%d/%m/%Y")
+        if pd.isna(d):  # NaN ou NaT
+            return ""
+        return str(d)  # preserva string original
+
+    agg["data_atendimento"] = agg["data_atendimento"].apply(_fmt_date_safe)
 
     # Ordenação amigável
-    cols_out = [
-        'tipo_guia', 'numeroGuiaPrestador', 'numeroGuiaOperadora',
-        'paciente', 'medico', 'data_atendimento',
-        'itens_na_guia', 'valor_total_xml',
-        'arquivo(s)', 'numero_lote(s)',
-        'duplicada', 'arquivos_duplicados', 'lotes_duplicados',
-        'retorno_no_periodo', 'retorno_ref',
-        'status_auditoria'
+    cols_order = [
+        "tipo_guia", "numeroGuiaPrestador", "numeroGuiaOperadora",
+        "paciente", "medico", "data_atendimento",
+        "itens_na_guia", "valor_total_xml",
+        "arquivo(s)", "numero_lote(s)",
+        "duplicada", "arquivos_duplicados", "lotes_duplicados",
+        "retorno_no_periodo", "retorno_ref",
+        "status_auditoria"
     ]
-    # Garante a existência de todas as colunas
-    for c in cols_out:
+
+    for c in cols_order:
         if c not in agg.columns:
-            agg[c] = None
+            agg[c] = ""
 
-    # Conversões finais e retornos
-    if 'valor_total_xml' in agg.columns:
-        agg['valor_total_xml'] = pd.to_numeric(agg['valor_total_xml'], errors='coerce').fillna(0.0)
-
-    # data em string para exibição estável
-    if 'data_atendimento' in agg.columns:
-        agg['data_atendimento'] = agg['data_atendimento'].apply(
-            lambda d: d.strftime('%d/%m/%Y') if isinstance(d, datetime) else (d if d else '')
-        )
-
-    return agg[cols_out]
-
+    return agg[cols_order]
 
 # =========================================================
 # PARTE 5 — Interface UI (Uploads, Parâmetros, Processamento, Exportação)
