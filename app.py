@@ -225,61 +225,122 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     return out
 
 
+
 # =========================================================
-# Demonstrativo (.xlsx) → Itens + motivos de glosa
+# Demonstrativo (.xlsx) → Itens + motivos de glosa (com mapeamento manual)
 # =========================================================
+import unicodedata
+
+def _normtxt(s: str) -> str:
+    s = str(s or "")
+    s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode()
+    s = s.lower().strip()
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+# Padrões ampliados — cobrindo variações comuns
 _COLMAPS = {
-    'lote'       : [r'^lote$'],
-    'competencia': [r'^compet', r'^m[êe]s|^mes/?ano'],
-    'guia_prest' : [r'prestador|guia\s*prest'],
-    'guia_oper'  : [r'operadora|guia\s*oper'],
-    'cod_proc'   : [r'c[oó]d.*proced|proced.*c[oó]d'],
-    'desc_proc'  : [r'descri|proced.*descri'],
-    'qtd_apres'  : [r'qtde|quant', r'apresent'],
-    'qtd_paga'   : [r'qtde|quant', r'(paga|autori)'],
-    'val_apres'  : [r'valor', r'apresent'],
-    'val_glosa'  : [r'glosa'],
-    'val_pago'   : [r'(valor.*(pago|apurado))|(pago$)|(apurado$)'],
-    'motivo_cod' : [r'(motivo.*c[oó]d)|(c[oó]d.*motivo)'],
-    'motivo_desc': [r'(descri.*motivo)|(motivo.*descri)'],
+    'lote'       : [r'\blote\b'],
+    'competencia': [r'compet|mes|m[e|e]s|compet[êe]ncia|periodo|referencia'],
+    'guia_prest' : [r'guia.*prest|prestador|n.*guia.*prest|numero.*guia.*prest'],
+    'guia_oper'  : [r'guia.*oper|operadora|n.*guia.*oper|numero.*guia.*oper'],
+    'cod_proc'   : [r'(cod|c[oó]d).*(proced|proc)|(proced|proc).*(cod|c[oó]d)|tuss'],
+    'desc_proc'  : [r'descri.*(proced|proc)|(proced|proc).*descri|descricao'],
+    'qtd_apres'  : [r'(qtd|quant).*(apr|apres|apresent)|(apres|apresent).*(qtd|quant)'],
+    'qtd_paga'   : [r'(qtd|quant).*(paga|autori|aprov)|(paga|autori|aprov).*(qtd|quant)'],
+    'val_apres'  : [r'valor.*(apres|apresent|cobrado)|(apres|apresent|cobrado).*valor'],
+    'val_glosa'  : [r'glosa|glosado|glosada'],
+    'val_pago'   : [r'valor.*(pago|apurado|liberado|aprovado)|(pago|apurado|liberado|aprovado)$'],
+    'motivo_cod' : [r'(motivo.*(cod|c[oó]d))|((cod|c[oó]d).*(motivo))'],
+    'motivo_desc': [r'(descri.*motivo)|(motivo.*descri)|motivo$'],
 }
 
-
 def _match_col(cols: List[str], pats: List[str]) -> Optional[str]:
-    for c in cols:
-        s = str(c).strip()
-        s_norm = re.sub(r'\s+', ' ', s.lower())
+    """Tenta casar colunas pelos padrões; usa normalização sem acentos."""
+    norm_cols = {c: _normtxt(c) for c in cols}
+    for c, cn in norm_cols.items():
         ok = True
         for p in pats:
-            if not re.search(p, s_norm):
+            if not re.search(p, cn):
                 ok = False
                 break
         if ok:
-            return s
+            return c
     return None
 
-
 def _find_header_row(df_raw: pd.DataFrame) -> int:
-    # Heurística: mesma usada por você (linha com "CPF/CNPJ" na primeira coluna)
-    s0 = df_raw.iloc[:, 0].astype(str).str.strip().str.lower()
-    mask = s0.eq('cpf/cnpj')
-    if mask.any():
-        return int(mask.idxmax()) + 1  # header é a linha seguinte
+    # Heurística: linha com "CPF/CNPJ" na primeira coluna → header na próxima linha
+    try:
+        s0 = df_raw.iloc[:, 0].astype(str).str.strip().map(_normtxt)
+        mask = s0.eq('cpf/cnpj')
+        if mask.any():
+            return int(mask.idxmax()) + 1
+    except Exception:
+        pass
     return 0
 
+def _apply_manual_map(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """Aplica mapeamento manual: {'val_apres':'Valor Apresentado', ...}."""
+    def pick(colkey):
+        name = mapping.get(colkey)
+        if not name or name == "(não usar)" or name not in df.columns:
+            return None
+        return df[name]
 
-def ler_demo_itens_pagto_xlsx(source, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    """Lê planilha itemizada do Demonstrativo; detecta colunas por regex/heurística."""
+    out = pd.DataFrame({
+        'numero_lote'            : pick('lote'),
+        'competencia'            : pick('competencia'),
+        'numeroGuiaPrestador'    : pick('guia_prest'),
+        'numeroGuiaOperadora'    : pick('guia_oper'),
+        'codigo_procedimento'    : pick('cod_proc'),
+        'descricao_procedimento' : pick('desc_proc'),
+        'quantidade_apresentada' : pd.to_numeric(pick('qtd_apres'), errors='coerce') if pick('qtd_apres') is not None else 0.0,
+        'quantidade_paga'        : pd.to_numeric(pick('qtd_paga'), errors='coerce')  if pick('qtd_paga')  is not None else 0.0,
+        'valor_apresentado'      : pd.to_numeric(pick('val_apres'), errors='coerce') if pick('val_apres') else 0.0,
+        'valor_glosa'            : pd.to_numeric(pick('val_glosa'), errors='coerce') if pick('val_glosa') else 0.0,
+        'valor_pago'             : pd.to_numeric(pick('val_pago'), errors='coerce')  if pick('val_pago')  else 0.0,
+        'motivo_glosa_codigo'    : pick('motivo_cod'),
+        'motivo_glosa_descricao' : pick('motivo_desc'),
+    })
+    # normalizações
+    for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
+        if c in out.columns and out[c] is not None:
+            out[c] = out[c].astype(str).str.strip()
+    for c in ['valor_apresentado', 'valor_glosa', 'valor_pago', 'quantidade_apresentada', 'quantidade_paga']:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
+
+    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(lambda s: normalize_code(s, strip_zeros=False))
+    out['chave_prest'] = (out.get('numeroGuiaPrestador', '').astype(str).str.strip()
+                          + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
+    out['chave_oper']  = (out.get('numeroGuiaOperadora', '').astype(str).str.strip()
+                          + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
+    return out
+
+def ler_demo_itens_pagto_xlsx(
+    source,
+    strip_zeros_codes: bool = False,
+    manual_map: Optional[Dict[str, Optional[str]]] = None,
+    prefer_sheet: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Lê planilha itemizada do Demonstrativo.
+    - Tenta auto-mapear por regex; se manual_map for fornecido, usa o mapeamento escolhido pelo usuário.
+    - prefer_sheet: força uma aba específica.
+    """
     xls = pd.ExcelFile(source, engine='openpyxl')
-    # escolher a planilha com "item" ou "análise"
+
     sheet = None
-    for s in xls.sheet_names:
-        s_norm = s.strip().lower()
-        if 'item' in s_norm or 'analise' in s_norm or 'análise' in s_norm:
-            sheet = s
-            break
-    if sheet is None:
-        sheet = xls.sheet_names[0]
+    if prefer_sheet and prefer_sheet in xls.sheet_names:
+        sheet = prefer_sheet
+    else:
+        for s in xls.sheet_names:
+            s_norm = _normtxt(s)
+            if any(k in s_norm for k in ['item', 'analise', 'análise', 'demonstrativo', 'analisedecontas']):
+                sheet = s
+                break
+        if sheet is None:
+            sheet = xls.sheet_names[0]
 
     df_raw = pd.read_excel(source, sheet_name=sheet, engine='openpyxl')
     hdr = _find_header_row(df_raw)
@@ -288,50 +349,54 @@ def ler_demo_itens_pagto_xlsx(source, strip_zeros_codes: bool = False) -> pd.Dat
         df.columns = df_raw.iloc[hdr]
         df = df_raw.iloc[hdr + 1:].reset_index(drop=True)
 
+    # Mapeamento manual (se fornecido)
+    if manual_map:
+        return _apply_manual_map(df, manual_map)
+
+    # Auto detecção
     cols = [str(c) for c in df.columns]
     pick = {k: _match_col(cols, v) for k, v in _COLMAPS.items()}
 
     if not any(pick.get(c) for c in ['val_apres', 'val_glosa', 'val_pago', 'cod_proc']):
-        raise ValueError("Não identifiquei colunas itemizadas no Demonstrativo. Anexe um exemplo para mapeamento.")
+        # Se não reconheceu, peça mapeamento manual ao chamador (raise para o fluxo captar)
+        raise ValueError("Não identifiquei colunas itemizadas no Demonstrativo (auto). Use o mapeamento manual.")
 
     def col(c): return pick.get(c)
 
     out = pd.DataFrame({
-        'numero_lote': df[col('lote')] if col('lote') else None,
-        'competencia': df[col('competencia')] if col('competencia') else None,
-        'numeroGuiaPrestador': (df[col('guia_prest')] if col('guia_prest') else None),
-        'numeroGuiaOperadora': (df[col('guia_oper')] if col('guia_oper') else None),
-        'codigo_procedimento': df[col('cod_proc')] if col('cod_proc') else None,
-        'descricao_procedimento': df[col('desc_proc')] if col('desc_proc') else None,
-        'quantidade_apresentada': pd.to_numeric(df[col('qtd_apres')], errors='coerce') if col('qtd_apres') else 0.0,
-        'quantidade_paga': pd.to_numeric(df[col('qtd_paga')], errors='coerce') if col('qtd_paga') else 0.0,
-        'valor_apresentado': pd.to_numeric(df[col('val_apres')], errors='coerce') if col('val_apres') else 0.0,
-        'valor_glosa': pd.to_numeric(df[col('val_glosa')], errors='coerce') if col('val_glosa') else 0.0,
-        'valor_pago': pd.to_numeric(df[col('val_pago')], errors='coerce') if col('val_pago') else 0.0,
-        'motivo_glosa_codigo': df[col('motivo_cod')] if col('motivo_cod') else None,
-        'motivo_glosa_descricao': df[col('motivo_desc')] if col('motivo_desc') else None,
+        'numero_lote'            : df[col('lote')] if col('lote') else None,
+        'competencia'            : df[col('competencia')] if col('competencia') else None,
+        'numeroGuiaPrestador'    : (df[col('guia_prest')] if col('guia_prest') else None),
+        'numeroGuiaOperadora'    : (df[col('guia_oper')] if col('guia_oper') else None),
+        'codigo_procedimento'    : df[col('cod_proc')] if col('cod_proc') else None,
+        'descricao_procedimento' : df[col('desc_proc')] if col('desc_proc') else None,
+        'quantidade_apresentada' : pd.to_numeric(df[col('qtd_apres')], errors='coerce') if col('qtd_apres') else 0.0,
+        'quantidade_paga'        : pd.to_numeric(df[col('qtd_paga')], errors='coerce')  if col('qtd_paga')  else 0.0,
+        'valor_apresentado'      : pd.to_numeric(df[col('val_apres')], errors='coerce') if col('val_apres') else 0.0,
+        'valor_glosa'            : pd.to_numeric(df[col('val_glosa')], errors='coerce') if col('val_glosa') else 0.0,
+        'valor_pago'             : pd.to_numeric(df[col('val_pago')], errors='coerce')  if col('val_pago')  else 0.0,
+        'motivo_glosa_codigo'    : df[col('motivo_cod')] if col('motivo_cod') else None,
+        'motivo_glosa_descricao' : df[col('motivo_desc')] if col('motivo_desc') else None,
     })
 
     # normalizações
     for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
         if c in out.columns and out[c] is not None:
             out[c] = out[c].astype(str).str.strip()
-
-    # códigos normalizados
-    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(
-        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
-    )
-
     for c in ['valor_apresentado', 'valor_glosa', 'valor_pago', 'quantidade_apresentada', 'quantidade_paga']:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
 
     # chaves
+    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(
+        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
+    )
     out['chave_prest'] = (out.get('numeroGuiaPrestador', '').astype(str).str.strip()
                           + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
     out['chave_oper']  = (out.get('numeroGuiaOperadora', '').astype(str).str.strip()
                           + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
     return out
+
 
 
 # =========================================================
@@ -369,15 +434,129 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     return df
 
 
+
 def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     parts = []
+    if not demo_files:
+        return pd.DataFrame()
+
+    st.session_state.setdefault('demo_mappings', {})
+
     for f in demo_files:
         if hasattr(f, 'seek'):
             f.seek(0)
-        parts.append(ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes))
+        fname = getattr(f, 'name', 'demo.xlsx')
+
+        # Se já existe mapeamento salvo na sessão, usa
+        mapping_info = st.session_state['demo_mappings'].get(fname)
+        if mapping_info:
+            try:
+                df_ok = ler_demo_itens_pagto_xlsx(
+                    f,
+                    strip_zeros_codes=strip_zeros_codes,
+                    manual_map=mapping_info.get('columns'),
+                    prefer_sheet=mapping_info.get('sheet')
+                )
+                parts.append(df_ok)
+                continue
+            except Exception as e:
+                st.warning(f"Mapeamento salvo para '{fname}' falhou ({e}). Tentando auto-detecção...")
+
+        # Tenta auto-detecção
+        try:
+            df_auto = ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes)
+            parts.append(df_auto)
+            continue
+        except Exception:
+            # Abre o wizard de mapeamento manual
+            with st.expander(f"⚙️ Configurar mapeamento para: {fname}", expanded=True):
+                df_manual = _mapping_wizard_for_demo(f)
+                if df_manual is not None:
+                    parts.append(df_manual)
+                else:
+                    st.error(f"Não foi possível mapear o demonstrativo '{fname}'. Preencha o mapeamento acima.")
+
     if parts:
         return pd.concat(parts, ignore_index=True)
     return pd.DataFrame()
+
+
+
+def _mapping_wizard_for_demo(uploaded_file) -> Optional[pd.DataFrame]:
+    """Exibe UI para mapear colunas do demonstrativo manualmente e retorna o DataFrame já mapeado."""
+    st.warning(f"Precisamos mapear manualmente o demonstrativo: **{uploaded_file.name}**")
+    try:
+        xls = pd.ExcelFile(uploaded_file, engine='openpyxl')
+    except Exception as e:
+        st.error(f"Não consegui abrir o arquivo: {e}")
+        return None
+
+    # escolher sheet
+    sheet = st.selectbox(
+        f"Selecione a aba (sheet) do demonstrativo **{uploaded_file.name}**",
+        xls.sheet_names,
+        key=f"map_sheet_{uploaded_file.name}"
+    )
+    df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, engine='openpyxl')
+    st.markdown("Prévia da planilha:")
+    st.dataframe(df_raw.head(15), use_container_width=True)
+
+    cols = [str(c) for c in df_raw.columns]
+    st.markdown("### Mapeie as colunas")
+    fields = [
+        ('lote', 'Lote (opcional)'),
+        ('competencia', 'Competência (opcional)'),
+        ('guia_prest', 'Número da Guia (Prestador)'),
+        ('guia_oper', 'Número da Guia (Operadora) (opcional)'),
+        ('cod_proc', 'Código do Procedimento (TUSS/código interno)'),
+        ('desc_proc', 'Descrição do Procedimento (opcional)'),
+        ('qtd_apres', 'Quantidade Apresentada (opcional)'),
+        ('qtd_paga', 'Quantidade Paga/Autorizada (opcional)'),
+        ('val_apres', 'Valor Apresentado'),
+        ('val_glosa', 'Valor Glosa'),
+        ('val_pago', 'Valor Pago/Apurado'),
+        ('motivo_cod', 'Motivo de Glosa (Código) (opcional)'),
+        ('motivo_desc', 'Motivo de Glosa (Descrição) (opcional)'),
+    ]
+
+    # defaults
+    def _default_for(key: str) -> int:
+        # tenta sugerir coluna com base no nome
+        for i, c in enumerate(cols):
+            cn = _normtxt(c)
+            pats = _COLMAPS.get(key, [])
+            if any(re.search(p, cn) for p in pats):
+                return i + 1  # +1 por causa da opção "(não usar)"
+        return 0
+
+    mapping: Dict[str, Optional[str]] = {}
+    for key, label in fields:
+        opt = ['(não usar)'] + cols
+        idx = _default_for(key)
+        sel = st.selectbox(label, opt, index=idx, key=f"map_{uploaded_file.name}_{key}")
+        mapping[key] = None if sel == '(não usar)' else sel
+
+    st.caption("Campos obrigatórios mínimos: **Código do Procedimento** e pelo menos **Valor Apresentado/Glosa/Pago**.")
+    do_map = st.button(f"Usar este mapeamento para {uploaded_file.name}", type="primary", key=f"btn_map_{uploaded_file.name}")
+    if not do_map:
+        return None
+
+    # salva mapeamento em sessão
+    st.session_state.setdefault('demo_mappings', {})
+    st.session_state['demo_mappings'][uploaded_file.name] = {'sheet': sheet, 'columns': mapping}
+
+    # aplica o mapeamento já agora
+    try:
+        df_mapped = ler_demo_itens_pagto_xlsx(
+            uploaded_file,
+            manual_map=mapping,
+            prefer_sheet=sheet
+        )
+        st.success("Mapeamento aplicado com sucesso!")
+        return df_mapped
+    except Exception as e:
+        st.error(f"Falha aplicando mapeamento: {e}")
+        return None
 
 
 def conciliar_itens(
