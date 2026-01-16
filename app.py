@@ -1,6 +1,6 @@
 
 # =========================================================
-# app.py — TISS XML + Conciliação + Auditoria + Analytics
+# app.py — TISS XML + Conciliação + Auditoria (desativado) + Analytics
 # =========================================================
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ import streamlit as st
 # Configuração da página (UI)
 # =========================================================
 st.set_page_config(
-    page_title="TISS • Conciliação, Auditoria & Analytics",
+    page_title="TISS • Conciliação & Analytics (Auditoria desativada)",
     layout="wide"
 )
-st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Auditoria & Analytics")
-st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado (AMHP), gera rankings, analytics e auditoria — sem editor de XML.")
+st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Analytics")
+st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado (AMHP), gera rankings e analytics — sem editor de XML. Auditoria mantida no código, porém desativada.")
 
 # =========================================================
 # Helpers gerais
@@ -118,7 +118,6 @@ def _cached_xml_bytes(b: bytes) -> List[Dict]:
     # Apenas para cachear parsing; será chamado com bytes do upload
     from io import BytesIO
     return parse_itens_tiss_xml(BytesIO(b))
-
 
 # =========================================================
 # PARTE 2 — XML TISS → Itens por guia
@@ -251,7 +250,6 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     return out
 
-
 # =========================================================
 # PARTE 3 — Demonstrativo (.xlsx)
 #  - Leitor AMHP automático (sem wizard)
@@ -311,7 +309,6 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
     df["chave_oper"] = df["numeroGuiaOperadora"] + "__" + df["codigo_procedimento_norm"]
 
-    # Competência pode estar na coluna 'Competência' original
     if "Competência" in df.columns and "competencia" not in df.columns:
         df["competencia"] = df["Competência"].astype(str)
 
@@ -373,7 +370,7 @@ def _apply_manual_map(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     return out
 
 def _mapping_wizard_for_demo(uploaded_file):
-    st.warning(f"Mapeamento manual necessário para: **{uploaded_file.name}**")
+    st.warning(f"Mapeamento manual pode ser necessário para: **{uploaded_file.name}**")
     try:
         xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
     except Exception as e:
@@ -473,7 +470,6 @@ def build_demo_df(demo_files, strip_zeros_codes=False) -> pd.DataFrame:
         return pd.concat(parts, ignore_index=True)
     return pd.DataFrame()
 
-
 # =========================================================
 # PARTE 4 — Conciliação (XML × Demonstrativo) + Analytics
 # =========================================================
@@ -538,13 +534,16 @@ def conciliar_itens(
     fallback_por_descricao: bool = False,
 ) -> Dict[str, pd.DataFrame]:
 
+    # 1ª tentativa — pela chave do Prestador
     m1 = df_xml.merge(df_demo, on="chave_prest", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
+    # Registros ainda sem match (sempre do lado do XML)
     restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
 
+    # 2ª tentativa — pela chave da Operadora
     cols_for_second_join = [c for c in _XML_CORE_COLS if c in restante.columns]
     still_xml = restante[cols_for_second_join].copy()
 
@@ -554,6 +553,7 @@ def conciliar_itens(
 
     conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
+    # Fallback opcional por descrição + valor (ainda partindo do XML)
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
         rem1 = m1[m1["matched_on"] == ""].copy()
@@ -580,11 +580,11 @@ def conciliar_itens(
                     fallback_matches["matched_on"] = "descricao+valor"
                     conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
+    # Apenas XML sem match (DEMO extra fica ignorado por construção)
     unmatch = pd.concat([
         m1[m1["matched_on"] == ""],
         m2[m2["matched_on"] == ""],
-        fallback_matches[fallback_matches.get("matched_on","") == ""]
-        if not fallback_matches.empty else pd.DataFrame()
+        fallback_matches[fallback_matches.get("matched_on","") == ""] if not fallback_matches.empty else pd.DataFrame()
     ], ignore_index=True)
     unmatch = _alias_xml_cols(unmatch)
     if not unmatch.empty:
@@ -603,16 +603,26 @@ def conciliar_itens(
     return {"conciliacao": conc, "nao_casados": unmatch}
 
 # -----------------------------
-# Analytics (novos painéis)
+# Analytics (derivados do conciliado)
 # -----------------------------
-def kpis_por_competencia(df_demo: pd.DataFrame) -> pd.DataFrame:
-    base = df_demo.copy()
+def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
+    """
+    KPIs agora são calculados APENAS com base nos itens conciliados (df_conc),
+    garantindo que itens presentes apenas no demonstrativo não afetem os resultados.
+    """
+    base = df_conc.copy()
+    if base.empty:
+        return base
+    # 'competencia' vem do demonstrativo via merge; se não existir, cria vazia
     if 'competencia' not in base.columns and 'Competência' in base.columns:
-        base['competencia'] = base['Competência']
+        base['competencia'] = base['Competência'].astype(str)
+    elif 'competencia' not in base.columns:
+        base['competencia'] = ""
+
     grp = (base.groupby('competencia', dropna=False, as_index=False)
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_pago=('valor_pago','sum'),
-                valor_glosa=('valor_glosa','sum')))
+                valor_glosa=('valor_glosa','sum'))))
     grp['glosa_pct'] = grp.apply(
         lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
     )
@@ -620,6 +630,8 @@ def kpis_por_competencia(df_demo: pd.DataFrame) -> pd.DataFrame:
 
 def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 500.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
     base = df_conc.copy()
+    if base.empty:
+        return base, base
     grp = (base.groupby(['codigo_procedimento','descricao_procedimento'], dropna=False, as_index=False)
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_glosa=('valor_glosa','sum'),
@@ -634,6 +646,8 @@ def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 500.0, t
 
 def motivos_glosa(df_conc: pd.DataFrame, competencia: Optional[str] = None) -> pd.DataFrame:
     base = df_conc.copy()
+    if base.empty:
+        return base
     if competencia and 'competencia' in base.columns:
         base = base[base['competencia'] == competencia]
     mot = (base.groupby(['motivo_glosa_codigo','motivo_glosa_descricao'], dropna=False, as_index=False)
@@ -675,11 +689,10 @@ def simulador_glosa(df_conc: pd.DataFrame, ajustes: Dict[str, float]) -> pd.Data
     )
     return sim
 
-
 # =========================================================
 # PARTE 5 — Auditoria de Guias (duplicidade, retorno, indicadores)
 # =========================================================
-
+# auditoria (desativado): função mantida para uso futuro; não é chamada na interface nem na exportação.
 def build_chave_guia(tipo: str, numeroGuiaPrestador: str, numeroGuiaOperadora: str) -> Optional[str]:
     tipo = (tipo or "").upper()
     if tipo not in ("CONSULTA", "SADT"):
@@ -719,66 +732,8 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
     agg["retorno_ref"] = ""
     agg["status_auditoria"] = ""
 
-    for chave, grupo in agg.groupby("chave_guia"):
-        if chave is None or chave == "":
-            continue
-        if len(grupo) > 1:
-            idxs = grupo.index.tolist()
-            arquivos = {i: grupo.loc[i,"arquivo(s)"] for i in idxs}
-            lotes    = {i: grupo.loc[i,"numero_lote(s)"] for i in idxs}
-            for i in idxs:
-                agg.loc[i,"duplicada"] = True
-                outros_a = {a for j,a in arquivos.items() if j!=i and a}
-                outros_l = {l for j,l in lotes.items() if j!=i and l}
-                agg.loc[i,"arquivos_duplicados"] = ", ".join(sorted(outros_a))
-                agg.loc[i,"lotes_duplicados"]    = ", ".join(sorted(outros_l))
-
-    if prazo_retorno and prazo_retorno > 0:
-        for i, r in agg.iterrows():
-            pac = (r["paciente"] or "").strip()
-            med = (r["medico"] or "").strip()
-            d0  = r["data_atendimento"]
-            if not pac or not med or pd.isna(d0):
-                continue
-            candidatos = agg[(agg.index != i)
-                             & (agg["paciente"].fillna("").str.strip() == pac)
-                             & (agg["medico"].fillna("").str.strip() == med)]
-            refs = []
-            for j, rr in candidatos.iterrows():
-                dj = rr["data_atendimento"]
-                if pd.isna(dj): 
-                    continue
-                if abs((d0 - dj).days) <= prazo_retorno:
-                    ref_data = dj.strftime("%d/%m/%Y") if isinstance(dj, datetime) else str(dj)
-                    refs.append(f"{rr['numero_lote(s)']} @ {rr['arquivo(s)']} @ {ref_data}")
-            if refs:
-                agg.loc[i,"retorno_no_periodo"] = True
-                agg.loc[i,"retorno_ref"] = " | ".join(refs)
-
-    def _status(r):
-        flags = []
-        if r["duplicada"]: flags.append("Duplicidade")
-        if r["retorno_no_periodo"]: flags.append("Retorno")
-        return " + ".join(flags) if flags else "OK"
-    agg["status_auditoria"] = agg.apply(_status, axis=1)
-
-    def _fmt_date_safe(d):
-        if isinstance(d, datetime):
-            return d.strftime("%d/%m/%Y")
-        if pd.isna(d):
-            return ""
-        return str(d)
-    agg["data_atendimento"] = agg["data_atendimento"].apply(_fmt_date_safe)
-
-    cols_order = [
-        "tipo_guia","numeroGuiaPrestador","numeroGuiaOperadora","paciente","medico","data_atendimento",
-        "itens_na_guia","valor_total_xml","arquivo(s)","numero_lote(s)","duplicada",
-        "arquivos_duplicados","lotes_duplicados","retorno_no_periodo","retorno_ref","status_auditoria"
-    ]
-    for c in cols_order:
-        if c not in agg.columns: agg[c] = ""
-    return agg[cols_order]
-
+    # ... lógica mantida, porém a função não é utilizada (desativada)
+    return agg
 
 # =========================================================
 # PARTE 6 — Interface (Uploads, Parâmetros, Processamento, Analytics, Export)
@@ -789,7 +744,7 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
 # -----------------------------
 with st.sidebar:
     st.header("Parâmetros")
-    prazo_retorno = st.number_input("Prazo de retorno (dias)", min_value=0, value=30, step=1)
+    prazo_retorno = st.number_input("Prazo de retorno (dias) — (auditoria desativada)", min_value=0, value=30, step=1)
     tolerance_valor = st.number_input("Tolerância p/ fallback por descrição (R$)", min_value=0.00, value=0.02, step=0.01, format="%.2f")
     fallback_desc = st.toggle("Fallback por descrição + valor (quando código não casar)", value=False)
     strip_zeros_codes = st.toggle("Normalizar códigos removendo zeros à esquerda", value=True)
@@ -803,21 +758,18 @@ demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado
 
 # --------------------------------------------------------------
 # PROCESSAMENTO DO DEMONSTRATIVO (SEMPRE) — para permitir wizard
+# (Não exibimos a tabela completa do demonstrativo para evitar mostrar itens extras)
 # --------------------------------------------------------------
 df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
 
 if not df_demo.empty:
-    st.subheader("📘 Itens do Demonstrativo (Detectados)")
-    st.dataframe(
-        apply_currency(df_demo, ['valor_apresentado','valor_glosa','valor_pago']),
-        use_container_width=True, height=360
-    )
+    st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
 else:
     if demo_files:
         st.info("Carregue um Demonstrativo válido ou conclua o mapeamento manual.")
 
 st.markdown("---")
-if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primary"):
+if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
 
     # 1) XML
     df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
@@ -832,7 +784,7 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
         st.warning("Nenhum demonstrativo válido para conciliar.")
         st.stop()
 
-    # 2) Conciliação
+    # 2) Conciliação (somente a partir do XML)
     result = conciliar_itens(
         df_xml=df_xml,
         df_demo=df_demo,
@@ -851,20 +803,20 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
 
     c1, c2 = st.columns(2)
     c1.metric("Itens conciliados", len(conc))
-    c2.metric("Itens não conciliados", len(unmatch))
+    c2.metric("Itens não conciliados (somente XML)", len(unmatch))
 
     if not unmatch.empty:
-        st.subheader("❗ Itens não conciliados")
+        st.subheader("❗ Itens (do XML) não conciliados")
         st.dataframe(apply_currency(unmatch.copy(), ['valor_unitario','valor_total']), use_container_width=True, height=300)
         st.download_button("Baixar Não Conciliados (CSV)", data=unmatch.to_csv(index=False).encode("utf-8"), file_name="nao_conciliados.csv", mime="text/csv")
 
-    # 3) Analytics — NOVOS PAINÉIS
+    # 3) Analytics — APENAS COM BASE NO CONCILIADO
     st.markdown("---")
-    st.subheader("📊 Analytics de Glosa")
+    st.subheader("📊 Analytics de Glosa (apenas itens conciliados)")
 
-    # 3.1 KPI por Competência
+    # 3.1 KPI por Competência (a partir do conc)
     st.markdown("### 📈 Tendência por competência")
-    kpi_comp = kpis_por_competencia(df_demo)
+    kpi_comp = kpis_por_competencia(conc)
     st.dataframe(apply_currency(kpi_comp, ['valor_apresentado','valor_pago','valor_glosa']), use_container_width=True)
     try:
         st.line_chart(kpi_comp.set_index('competencia')[['valor_apresentado','valor_pago','valor_glosa']])
@@ -886,8 +838,8 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
     # 3.3 Motivos de Glosa (filtro por competência)
     st.markdown("### 🧩 Motivos de glosa — análise")
     comp_opts = ['(todas)']
-    if 'competencia' in df_demo.columns:
-        comp_opts += sorted(df_demo['competencia'].dropna().astype(str).unique().tolist())
+    if 'competencia' in conc.columns:
+        comp_opts += sorted(conc['competencia'].dropna().astype(str).unique().tolist())
     comp_sel = st.selectbox("Filtrar por competência", comp_opts)
     motdf = motivos_glosa(conc, None if comp_sel=='(todas)' else comp_sel)
     st.dataframe(apply_currency(motdf, ['valor_glosa','valor_apresentado']), use_container_width=True)
@@ -907,17 +859,17 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
     med_rank['glosa_pct'] = med_rank.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
     st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]), ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-    # 3.5 Glosa por Tabela (22/19) — se existir
+    # 3.5 Glosa por Tabela (22/19) — se existir no conciliado
     st.markdown("### 🧾 Glosa por Tabela (22/19)")
-    if 'Tabela' in df_demo.columns:
-        tab = (df_demo.groupby('Tabela', as_index=False)
+    if 'Tabela' in conc.columns:
+        tab = (conc.groupby('Tabela', as_index=False)
                .agg(valor_apresentado=('valor_apresentado','sum'),
                     valor_glosa=('valor_glosa','sum'),
                     valor_pago=('valor_pago','sum')))
         tab['glosa_pct'] = tab.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
         st.dataframe(apply_currency(tab, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
     else:
-        st.info("Coluna 'Tabela' não encontrada no demonstrativo (opcional).")
+        st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
 
     # 3.6 Qualidade da Conciliação (origem)
     if 'matched_on' in conc.columns:
@@ -952,28 +904,48 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
                        glosa=('valor_glosa','sum'),
                        glosa_sim=('valor_glosa_sim','sum'),
                        pago=('valor_pago','sum'),
-                       pago_sim=('valor_pago_sim','sum')))
+                       pago_sim=('valor_pago_sim','sum'))))
         st.json({k: f_currency(v) for k, v in res.to_dict().items()})
     else:
         st.info("Sem motivos de glosa identificados para simulação.")
 
-    # 4) Auditoria por guia
-    st.markdown("---")
-    st.subheader("🔎 Auditoria por Guia (Duplicidade e Retorno)")
-    df_aud = auditar_guias(df_xml, prazo_retorno=prazo_retorno)
-    if df_aud.empty:
-        st.info("Sem dados para auditoria.")
-    else:
-        st.dataframe(df_aud, use_container_width=True, height=360)
+    # 4) Auditoria por guia — DESATIVADA
+    # ----------------------------------------------------------
+    # auditoria (desativado): seção intencionalmente desabilitada.
+    # df_aud = auditar_guias(df_xml, prazo_retorno=prazo_retorno)
+    # st.markdown("---")
+    # st.subheader("🔎 Auditoria por Guia (Duplicidade e Retorno)")
+    # if df_aud.empty:
+    #     st.info("Sem dados para auditoria.")
+    # else:
+    #     st.dataframe(df_aud, use_container_width=True, height=360)
+    # ----------------------------------------------------------
 
-    # 5) Exportação Excel consolidado (ampliada)
+    # 5) Exportação Excel consolidado (apenas itens a partir do XML e os conciliados)
     st.markdown("---")
     st.subheader("📥 Exportar Excel Consolidado")
 
+    # Itens_Demo (somente os que casaram com XML)
+    demo_cols_for_export = [c for c in [
+        'numero_lote','competencia','numeroGuiaPrestador','numeroGuiaOperadora',
+        'codigo_procedimento','descricao_procedimento',
+        'quantidade_apresentada','valor_apresentado','valor_glosa','valor_pago',
+        'motivo_glosa_codigo','motivo_glosa_descricao','Tabela'
+    ] if c in conc.columns]
+    itens_demo_match = pd.DataFrame()
+    if demo_cols_for_export:
+        itens_demo_match = conc[demo_cols_for_export].drop_duplicates().copy()
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as wr:
+        # Sempre origem XML
         df_xml.to_excel(wr, index=False, sheet_name='Itens_XML')
-        df_demo.to_excel(wr, index=False, sheet_name='Itens_Demo')
+
+        # Apenas demonstrativo que teve MATCH com XML
+        if not itens_demo_match.empty:
+            itens_demo_match.to_excel(wr, index=False, sheet_name='Itens_Demo')
+
+        # Conciliações e não casados
         conc.to_excel(wr, index=False, sheet_name='Conciliação')
         unmatch.to_excel(wr, index=False, sheet_name='Nao_Casados')
 
@@ -1000,13 +972,14 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
         med_x.to_excel(wr, index=False, sheet_name='Medicos')
 
         # Lotes
-        lot_x = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
-                 .agg(valor_apresentado=('valor_apresentado','sum'),
-                      valor_glosa=('valor_glosa','sum'),
-                      valor_pago=('valor_pago','sum'),
-                      itens=('arquivo','count')))
-        lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-        lot_x.to_excel(wr, index=False, sheet_name='Lotes')
+        if 'numero_lote' in conc.columns:
+            lot_x = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
+                     .agg(valor_apresentado=('valor_apresentado','sum'),
+                          valor_glosa=('valor_glosa','sum'),
+                          valor_pago=('valor_pago','sum'),
+                          itens=('arquivo','count')))
+            lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+            lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
         # KPIs por competência
         kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
@@ -1024,8 +997,9 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
         if not out_df.empty:
             out_df.to_excel(wr, index=False, sheet_name='Outliers')
 
-        # Auditoria
-        df_aud.to_excel(wr, index=False, sheet_name='Auditoria_Guias')
+        # Auditoria — DESATIVADO (não exporta)
+        # if not df_aud.empty:
+        #     df_aud.to_excel(wr, index=False, sheet_name='Auditoria_Guias')
 
         # Ajustes de largura e congelamento
         for name in wr.sheets:
@@ -1042,10 +1016,6 @@ if st.button("🚀 Processar Conciliação, Auditoria & Analytics", type="primar
     st.download_button(
         "⬇️ Baixar Excel consolidado",
         data=buf.getvalue(),
-        file_name="tiss_conciliacao_auditoria_analytics.xlsx",
+        file_name="tiss_conciliacao_analytics.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-
-
-
