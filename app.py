@@ -210,6 +210,7 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     # CONSULTA
     for guia in root.findall('.//ans:guiaConsulta', ANS_NS):
+        cab = guia.find('ans:cabecalhoGuia', ANS_NS)
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
