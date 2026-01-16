@@ -274,75 +274,76 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def ler_demo_amhp_fixado(path, strip_zeros_codes=False) -> pd.DataFrame:
-    # Lê SEM cabeçalho
-    df_raw = pd.read_excel(path, header=None, engine="openpyxl")
+def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
+    # 1) Lê o arquivo bruto para localizar o cabeçalho
+    # Se for CSV (como o detectado), usa read_csv; se for Excel, read_excel
+    try:
+        df_raw = pd.read_excel(path, header=None, engine="openpyxl")
+    except:
+        df_raw = pd.read_csv(path, header=None)
 
-    # Detecta automaticamente a primeira linha de dados (com CNPJ)
-    header_idx = None
-    for i in range(0, min(30, len(df_raw))):
-        row = df_raw.iloc[i].astype(str)
-        c0 = re.sub(r'\D', '', row[0])
-        if len(c0) >= 11:  # CNPJ detectado
-            header_idx = i - 1
+    # 2) Localiza a linha do cabeçalho (onde está a coluna CPF/CNPJ)
+    header_row = None
+    for i in range(min(20, len(df_raw))):
+        row_values = df_raw.iloc[i].astype(str).tolist()
+        if any("CPF/CNPJ" in str(val).upper() for val in row_values):
+            header_row = i
             break
+    
+    if header_row is None:
+        raise ValueError("Não foi possível localizar a linha de cabeçalho 'CPF/CNPJ' no demonstrativo.")
 
-    if header_idx is None or header_idx < 0:
-        raise ValueError("Não foi possível detectar o cabeçalho do demonstrativo AMHP.")
+    # 3) Lê novamente a partir do cabeçalho correto
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = df_raw.iloc[header_row]
+    
+    # Remove colunas sem nome (Unnamed)
+    df = df.loc[:, df.columns.notna()]
 
-    # Recarrega com header correto
-    df = pd.read_excel(path, header=header_idx, engine="openpyxl")
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # Renomeia colunas AMHP padrão
-    colmap = {
-        "CNPJ": "cnpj",
-        "Prestador": "prestador",
-        "Lote": "numero_lote",
-        "Competência": "competencia",
+    # 4) Renomeia para o padrão interno do seu código
+    ren = {
         "Guia": "numeroGuiaPrestador",
-        "Data Realização": "data_atendimento",
-        "Tabela": "tabela",
         "Cod. Procedimento": "codigo_procedimento",
         "Descrição": "descricao_procedimento",
-        "Grau part.": "grau",
         "Valor Apresentado": "valor_apresentado",
-        "Quant. Exec.": "quantidade_apresentada",
         "Valor Apurado": "valor_pago",
         "Valor Glosa": "valor_glosa",
-        "Código Glosa": "codigo_glosa",
+        "Quant. Exec.": "quantidade_apresentada",
+        "Código Glosa": "codigo_glosa_bruto", # Para processar depois
     }
-    df = df.rename(columns=colmap)
+    df = df.rename(columns=ren)
 
-    # Mantém apenas linhas válidas (guia numérica)
-    if "numeroGuiaPrestador" in df.columns:
-        df = df[df["numeroGuiaPrestador"].astype(str).str.strip().str.isnumeric()]
+    # 5) Limpeza Crítica: Guia e Código
+    def clean_guia(val):
+        s = str(val).strip().split('.')[0] # Remove .0
+        return s.lstrip('0') # Remove zeros à esquerda para alinhar com XML
 
-    # Normaliza nº guia
-    df["numeroGuiaPrestador"] = (
-        df["numeroGuiaPrestador"].astype(str)
-          .str.replace(".0", "", regex=False)
-          .str.lstrip("0")
-    )
-
-    # Normaliza códigos
+    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].apply(clean_guia)
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
+    
+    # Normalização de códigos (procedimentos e materiais)
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
 
-    # Cria chaves
+    # 6) Conversão Numérica
+    for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
+
+    # 7) Criação das Chaves de Conciliação
+    df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
     df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
     df["chave_oper"] = df["chave_prest"]
 
-    # Motivo glosa
-    if "codigo_glosa" in df.columns:
-        gl = df["codigo_glosa"].astype(str)
-        df["motivo_glosa_codigo"] = gl.str.extract(r"^(\d+)")
-        df["motivo_glosa_descricao"] = gl.str.extract(r"\d+\s*-\s*(.*)")
+    # 8) Tratamento da Glosa (separar código de texto)
+    if "codigo_glosa_bruto" in df.columns:
+        df["motivo_glosa_codigo"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^(\d+)")
+        df["motivo_glosa_descricao"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^\d+\s*-\s*(.*)")
+        df["motivo_glosa_codigo"] = df["motivo_glosa_codigo"].fillna("").str.strip()
+        df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
 
     return df.reset_index(drop=True)
-
 
 
 # Auto-detecção genérica (fallback)
