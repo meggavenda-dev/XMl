@@ -4,686 +4,750 @@ from __future__ import annotations
 
 import io
 import re
-import math
-from decimal import Decimal
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional, Union, IO
+from decimal import Decimal
+from datetime import datetime
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import streamlit as st
 
-from tiss_parser import (
-    parse_tiss_xml,
-    parse_many_xmls,
-    audit_por_guia,
-    __version__ as PARSER_VERSION
-)
-
 # =========================================================
 # Config & Header
 # =========================================================
-st.set_page_config(page_title="Leitor TISS XML (Consulta • SADT • Recurso)", layout="wide")
-st.title("Leitor de XML TISS (Consulta, SP‑SADT e Recurso de Glosa)")
-st.caption(f"Extrai nº do lote, protocolo (quando houver), quantidade de guias e valor total • Parser {PARSER_VERSION}")
-
-tab1, tab2 = st.tabs(["Upload de XML(s)", "Ler de uma pasta local (clonada do GitHub)"])
+st.set_page_config(page_title="TISS • Itens por Guia + Conciliação + Auditoria", layout="wide")
+st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Auditoria")
+st.caption("Lê XML TISS (Consulta e SP‑SADT), concilia com Demonstrativo itemizado (motivos de glosa), gera rankings e auditoria — sem editor de XML.")
 
 # =========================================================
-# FORMATAÇÃO DE MOEDA (BR)
+# Helpers gerais
 # =========================================================
-def format_currency_br(val) -> str:
-    """
-    Converte número em string 'R$ 1.234,56'.
-    - Valores None/NaN/Inf/Inválidos -> 'R$ 0,00'
-    - Mantém sinal negativo com prefixo '-'
-    """
+ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
+DEC_ZERO = Decimal('0')
+
+
+def dec(txt: Optional[str]) -> Decimal:
+    if txt is None:
+        return DEC_ZERO
+    s = str(txt).strip().replace(',', '.')
+    return Decimal(s) if s else DEC_ZERO
+
+
+def tx(el: Optional[ET.Element]) -> str:
+    return (el.text or '').strip() if (el is not None and el.text) else ''
+
+
+def f_currency(v: Union[int, float, Decimal, str]) -> str:
     try:
-        v = float(Decimal(str(val)))
+        v = float(v)
     except Exception:
-        v = 0.0
-    if not math.isfinite(v):
         v = 0.0
     neg = v < 0
     v = abs(v)
     inteiro = int(v)
-    centavos = int(round((v - inteiro) * 100))
-    inteiro_fmt = f"{inteiro:,}".replace(",", ".")
-    centavos_fmt = f"{centavos:02d}"
-    s = f"R$ {inteiro_fmt},{centavos_fmt}"
+    cent = int(round((v - inteiro) * 100))
+    s = f"R$ {inteiro:,}".replace(",", ".") + f",{cent:02d}"
     return f"-{s}" if neg else s
 
-def _df_display_currency(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    dfd = df.copy()
+
+def apply_currency(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    d = df.copy()
     for c in cols:
-        if c in dfd.columns:
-            dfd[c] = dfd[c].apply(format_currency_br)
-    return dfd
+        if c in d.columns:
+            d[c] = d[c].apply(f_currency)
+    return d
 
-# =========================================================
-# Extração "lote" a partir do nome do arquivo
-# =========================================================
-_LOTE_REGEX = re.compile(r'(?i)lote\s*[-_]*\s*(\d+)')
 
-def extract_lote_from_filename(name: str) -> str | None:
-    if not isinstance(name, str):
+def parse_date_flex(s: str) -> Optional[datetime]:
+    if not s or not isinstance(s, str):
         return None
-    m = _LOTE_REGEX.search(name)
-    if m:
-        return m.group(1)
-    # Fallback opcional: capturar o primeiro número com >=5 dígitos
-    # m2 = re.search(r'(\d{5,})', name)
-    # return m2.group(1) if m2 else None
+    s = s.strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
     return None
 
-# =========================================================
-# Utils de dataframe/saída
-# =========================================================
-def _to_float(val) -> float:
-    try:
-        return float(Decimal(str(val)))
-    except Exception:
-        return 0.0
 
-def _df_format(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Garantia de tipos, colunas auxiliares e ordenação para exibição/CSV.
-    Adiciona:
-      - suspeito: qtde_guias>0 e valor_total==0
-      - lote_arquivo (+ lote_arquivo_int): extraídos do nome
-      - lote_confere: confere lote_arquivo == numero_lote
-    """
-    if 'valor_total' in df.columns:
-        df['valor_total'] = df['valor_total'].apply(_to_float)
+def normalize_code(s: str, strip_zeros: bool = False) -> str:
+    """Remove pontuação e espaços; opcionalmente retira zeros à esquerda."""
+    if s is None:
+        return ""
+    s2 = re.sub(r'[\.\-_/ \t]', '', str(s)).strip()
+    return s2.lstrip('0') if strip_zeros else s2
 
-    if 'qtde_guias' in df.columns and 'valor_total' in df.columns:
-        df['suspeito'] = (df['qtde_guias'] > 0) & (df['valor_total'] == 0)
+
+# =========================================================
+# XML TISS → Itens por guia
+# =========================================================
+def _get_numero_lote(root: ET.Element) -> str:
+    el = root.find('.//ans:prestadorParaOperadora/ans:loteGuias/ans:numeroLote', ANS_NS)
+    if el is not None and tx(el):
+        return tx(el)
+    el = root.find('.//ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa/ans:numeroLote', ANS_NS)
+    if el is not None and tx(el):
+        return tx(el)
+    return ""
+
+
+def _itens_consulta(guia: ET.Element) -> List[Dict]:
+    proc = guia.find('.//ans:procedimento', ANS_NS)
+    codigo_tabela = tx(proc.find('ans:codigoTabela', ANS_NS)) if proc is not None else ''
+    codigo_proc   = tx(proc.find('ans:codigoProcedimento', ANS_NS)) if proc is not None else ''
+    descricao     = tx(proc.find('ans:descricaoProcedimento', ANS_NS)) if proc is not None else ''
+    valor         = dec(tx(proc.find('ans:valorProcedimento', ANS_NS))) if proc is not None else DEC_ZERO
+
+    return [{
+        'tipo_item': 'procedimento',
+        'identificadorDespesa': '',
+        'codigo_tabela': codigo_tabela,
+        'codigo_procedimento': codigo_proc,
+        'descricao_procedimento': descricao,
+        'quantidade': Decimal('1'),
+        'valor_unitario': valor,
+        'valor_total': valor
+    }]
+
+
+def _itens_sadt(guia: ET.Element) -> List[Dict]:
+    out: List[Dict] = []
+
+    # procedimentosExecutados
+    for it in guia.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
+        proc = it.find('ans:procedimento', ANS_NS)
+        codigo_tabela = tx(proc.find('ans:codigoTabela', ANS_NS)) if proc is not None else ''
+        codigo_proc   = tx(proc.find('ans:codigoProcedimento', ANS_NS)) if proc is not None else ''
+        descricao     = tx(proc.find('ans:descricaoProcedimento', ANS_NS)) if proc is not None else ''
+
+        qtd  = dec(tx(it.find('ans:quantidadeExecutada', ANS_NS)))
+        vuni = dec(tx(it.find('ans:valorUnitario', ANS_NS)))
+        vtot = dec(tx(it.find('ans:valorTotal', ANS_NS)))
+        if vtot == DEC_ZERO and (vuni > DEC_ZERO and qtd > DEC_ZERO):
+            vtot = vuni * qtd
+
+        out.append({
+            'tipo_item': 'procedimento',
+            'identificadorDespesa': '',
+            'codigo_tabela': codigo_tabela,
+            'codigo_procedimento': codigo_proc,
+            'descricao_procedimento': descricao,
+            'quantidade': qtd if qtd > DEC_ZERO else Decimal('1'),
+            'valor_unitario': vuni if vuni > DEC_ZERO else (vtot if (vtot > DEC_ZERO) else DEC_ZERO),
+            'valor_total': vtot if vtot > DEC_ZERO else (vuni * qtd if (vuni > DEC_ZERO and qtd > DEC_ZERO) else DEC_ZERO),
+        })
+
+    # outrasDespesas
+    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
+        ident = tx(desp.find('ans:identificadorDespesa', ANS_NS))
+        sv = desp.find('ans:servicosExecutados', ANS_NS)
+        codigo_tabela = tx(sv.find('ans:codigoTabela', ANS_NS)) if sv is not None else ''
+        codigo_proc   = tx(sv.find('ans:codigoProcedimento', ANS_NS)) if sv is not None else ''
+        descricao     = tx(sv.find('ans:descricaoProcedimento', ANS_NS)) if sv is not None else ''
+        qtd  = dec(tx(sv.find('ans:quantidadeExecutada', ANS_NS))) if sv is not None else DEC_ZERO
+        vuni = dec(tx(sv.find('ans:valorUnitario', ANS_NS)))      if sv is not None else DEC_ZERO
+        vtot = dec(tx(sv.find('ans:valorTotal', ANS_NS)))         if sv is not None else DEC_ZERO
+        if vtot == DEC_ZERO and (vuni > DEC_ZERO and qtd > DEC_ZERO):
+            vtot = vuni * qtd
+
+        out.append({
+            'tipo_item': 'outra_despesa',
+            'identificadorDespesa': ident,
+            'codigo_tabela': codigo_tabela,
+            'codigo_procedimento': codigo_proc,
+            'descricao_procedimento': descricao,
+            'quantidade': qtd if qtd > DEC_ZERO else Decimal('1'),
+            'valor_unitario': vuni if vuni > DEC_ZERO else (vtot if (vtot > DEC_ZERO) else DEC_ZERO),
+            'valor_total': vtot if vtot > DEC_ZERO else (vuni * qtd if (vuni > DEC_ZERO and qtd > DEC_ZERO) else DEC_ZERO),
+        })
+
+    return out
+
+
+def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
+    """Extrai itens por guia (Consulta e SP‑SADT)."""
+    if hasattr(source, 'read'):
+        if hasattr(source, 'seek'):
+            source.seek(0)
+        root = ET.parse(source).getroot()
+        arquivo_nome = Path(getattr(source, 'name', 'upload.xml')).name
     else:
-        df['suspeito'] = False
+        p = Path(source)
+        root = ET.parse(p).getroot()
+        arquivo_nome = p.name
 
-    if 'protocolo' not in df.columns:
-        df['protocolo'] = None
+    numero_lote = _get_numero_lote(root)
+    out: List[Dict] = []
 
-    df['lote_arquivo'] = df['arquivo'].apply(extract_lote_from_filename)
-    df['lote_arquivo_int'] = pd.to_numeric(df['lote_arquivo'], errors='coerce').astype('Int64')
+    # CONSULTA
+    for guia in root.findall('.//ans:guiaConsulta', ANS_NS):
+        numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
+        medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
+        data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
 
-    if 'numero_lote' in df.columns:
-        df['lote_confere'] = (df['lote_arquivo'].fillna('') == df['numero_lote'].fillna(''))
-    else:
-        df['lote_confere'] = pd.NA
+        for it in _itens_consulta(guia):
+            it.update({
+                'arquivo': arquivo_nome,
+                'numero_lote': numero_lote,
+                'tipo_guia': 'CONSULTA',
+                'numeroGuiaPrestador': numero_guia_prest,
+                'numeroGuiaOperadora': '',
+                'paciente': paciente,
+                'medico': medico,
+                'data_atendimento': data_atd,
+            })
+            out.append(it)
 
-    if 'erro' not in df.columns:
-        df['erro'] = None
+    # SADT
+    for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
+        cab = guia.find('ans:cabecalhoGuia', ANS_NS)
+        numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS)) if cab is not None else ''
+        numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
+        paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
+        medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
+        data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
 
-    for c in ('valor_glosado', 'valor_liberado'):
-        if c not in df.columns:
-            df[c] = 0.0
+        for it in _itens_sadt(guia):
+            it.update({
+                'arquivo': arquivo_nome,
+                'numero_lote': numero_lote,
+                'tipo_guia': 'SADT',
+                'numeroGuiaPrestador': numero_guia_prest,
+                'numeroGuiaOperadora': numero_guia_oper,
+                'paciente': paciente,
+                'medico': medico,
+                'data_atendimento': data_atd,
+            })
+            out.append(it)
 
-    ordenar = [
-        'numero_lote', 'protocolo', 'tipo', 'qtde_guias',
-        'valor_total', 'valor_glosado', 'valor_liberado', 'estrategia_total',
-        'arquivo', 'lote_arquivo', 'lote_arquivo_int', 'lote_confere',
-        'suspeito', 'erro', 'parser_version'
-    ]
-    cols = [c for c in ordenar if c in df.columns] + [c for c in df.columns if c not in ordenar]
-    df = df[cols].sort_values(['numero_lote', 'tipo', 'arquivo'], ignore_index=True)
-    return df
+    return out
 
-def _make_agg(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=['numero_lote', 'tipo', 'qtde_arquivos', 'qtde_guias_total', 'valor_total'])
-    agg = df.groupby(['numero_lote', 'tipo'], dropna=False, as_index=False).agg(
-        qtde_arquivos=('arquivo', 'count'),
-        qtde_guias_total=('qtde_guias', 'sum'),
-        valor_total=('valor_total', 'sum')
-    ).sort_values(['numero_lote', 'tipo'], ignore_index=True)
-    return agg
-
-# =========================================================
-# Leitura do Demonstrativo de Pagamento (.xlsx)
-# =========================================================
-def _norm_lote(v) -> str | None:
-    """Normaliza 'Lote' para string compatível com numero_lote do XML (remove '.0', pega só dígitos)."""
-    if pd.isna(v):
-        return None
-    s = str(v).strip()
-    try:
-        f = float(s)
-        if f.is_integer():
-            return str(int(f))
-    except Exception:
-        pass
-    digits = ''.join(ch for ch in s if ch.isdigit())
-    return digits if digits else s
-
-def ler_demonstrativo_pagto_xlsx(source) -> pd.DataFrame:
-    """
-    Lê a planilha 'DemonstrativoAnaliseDeContas' e agrega por (numero_lote, competencia):
-      - valor_apresentado, valor_apurado (liberado), valor_glosa, linhas
-    Retorna colunas: numero_lote | competencia | valor_apresentado | valor_apurado | valor_glosa | linhas
-    """
-    df_raw = pd.read_excel(source, sheet_name='DemonstrativoAnaliseDeContas', engine='openpyxl')
-
-    mask = df_raw.iloc[:, 0].astype(str).str.strip().eq('CPF/CNPJ')
-    if not mask.any():
-        raise ValueError("Cabeçalho 'CPF/CNPJ' não encontrado no Demonstrativo.")
-    header_idx = mask.idxmax()
-
-    df = df_raw.iloc[header_idx:]
-    df.columns = df.iloc[0]
-    df = df.iloc[1:].reset_index(drop=True)
-
-    need = ['Lote', 'Competência', 'Valor Apresentado', 'Valor Apurado', 'Valor Glosa']
-    faltando = [c for c in need if c not in df.columns]
-    if faltando:
-        raise ValueError(f"Colunas ausentes no Demonstrativo: {faltando}")
-
-    df['numero_lote'] = df['Lote'].apply(_norm_lote)
-    for c in ['Valor Apresentado', 'Valor Apurado', 'Valor Glosa']:
-        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
-
-    demo_agg = (
-        df.groupby(['numero_lote', df['Competência'].astype(str).str.strip()], dropna=False)
-          .agg(valor_apresentado=('Valor Apresentado', 'sum'),
-               valor_apurado=('Valor Apurado', 'sum'),
-               valor_glosa=('Valor Glosa', 'sum'),
-               linhas=('numero_lote', 'count'))
-          .reset_index()
-          .rename(columns={'Competência': 'competencia'})
-    )
-    return demo_agg
 
 # =========================================================
-# Conciliação — chave com separação por TIPO e preferência por LOTE DO ARQUIVO (RECURSO)
+# Demonstrativo (.xlsx) → Itens + motivos de glosa
 # =========================================================
-def _build_chave_concil(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.DataFrame:
-    """
-    Cria as colunas:
-      - numero_lote_norm: normalização do nº do lote vindo do XML
-      - lote_arquivo_norm: nº do lote extraído do nome do arquivo
-      - demo_lote: lote escolhido para procurar no demonstrativo
-           Regra:
-             * Para RECURSO: preferir 'lote_arquivo_norm' se existir no demonstrativo;
-                              senão, tentar heurística startswith; senão, usar numero_lote_norm/arq.
-             * Para demais:  preferir 'numero_lote_norm'; se não existir, tentar heurística startswith com 'lote_arquivo_norm'; por fim 'lote_arquivo_norm'.
-      - chave_concil: f"{demo_lote}__{tipo}"  (garante que RECURSO e FATURAMENTO não se misturem)
-    """
-    df = df_xml.copy()
-    demo_keys = set(demo_agg['numero_lote'].dropna().astype(str).str.strip()) if not demo_agg.empty else set()
+_COLMAPS = {
+    'lote'       : [r'^lote$'],
+    'competencia': [r'^compet', r'^m[êe]s|^mes/?ano'],
+    'guia_prest' : [r'prestador|guia\s*prest'],
+    'guia_oper'  : [r'operadora|guia\s*oper'],
+    'cod_proc'   : [r'c[oó]d.*proced|proced.*c[oó]d'],
+    'desc_proc'  : [r'descri|proced.*descri'],
+    'qtd_apres'  : [r'qtde|quant', r'apresent'],
+    'qtd_paga'   : [r'qtde|quant', r'(paga|autori)'],
+    'val_apres'  : [r'valor', r'apresent'],
+    'val_glosa'  : [r'glosa'],
+    'val_pago'   : [r'(valor.*(pago|apurado))|(pago$)|(apurado$)'],
+    'motivo_cod' : [r'(motivo.*c[oó]d)|(c[oó]d.*motivo)'],
+    'motivo_desc': [r'(descri.*motivo)|(motivo.*descri)'],
+}
 
-    df['numero_lote_norm'] = df['numero_lote'].apply(_norm_lote)
-    df['lote_arquivo_norm'] = df['lote_arquivo'].apply(_norm_lote)
 
-    def choose_demo_lote(row):
-        tipo = (row.get('tipo') or '').upper()
-        num = (row.get('numero_lote_norm') or '').strip()
-        arq = (row.get('lote_arquivo_norm') or '').strip()
+def _match_col(cols: List[str], pats: List[str]) -> Optional[str]:
+    for c in cols:
+        s = str(c).strip()
+        s_norm = re.sub(r'\s+', ' ', s.lower())
+        ok = True
+        for p in pats:
+            if not re.search(p, s_norm):
+                ok = False
+                break
+        if ok:
+            return s
+    return None
 
-        if tipo == 'RECURSO':
-            # Caso do Guilherme: arquivo "LOTE 132238 Recurso ...xml" mas XML traz numeroLote=92400
-            if arq and arq in demo_keys:
-                return arq
-            if num and arq and num.startswith(arq) and arq in demo_keys:
-                return arq
-            # fallback
-            return arq or num or None
-        else:
-            if num and num in demo_keys:
-                return num
-            if num and arq and num.startswith(arq) and arq in demo_keys:
-                return arq
-            if arq and arq in demo_keys:
-                return arq
-            # fallback
-            return num or arq or None
 
-    df['demo_lote'] = df.apply(choose_demo_lote, axis=1)
-    df['chave_concil'] = df.apply(
-        lambda r: f"{(r.get('demo_lote') or r.get('numero_lote_norm') or r.get('lote_arquivo_norm') or '')}__{r.get('tipo')}",
-        axis=1
-    )
-    return df
+def _find_header_row(df_raw: pd.DataFrame) -> int:
+    # Heurística: mesma usada por você (linha com "CPF/CNPJ" na primeira coluna)
+    s0 = df_raw.iloc[:, 0].astype(str).str.strip().str.lower()
+    mask = s0.eq('cpf/cnpj')
+    if mask.any():
+        return int(mask.idxmax()) + 1  # header é a linha seguinte
+    return 0
 
-# =========================================================
-# Baixa por lote — usando (demo_lote, tipo)
-# =========================================================
-def _make_baixa_por_lote(df_xml: pd.DataFrame, demo_agg: pd.DataFrame) -> pd.DataFrame:
-    """
-    Produz tabela de baixa por lote, separando por tipo (faturamento x recurso).
-    - Agrupa XML por chave_concil (demo_lote__tipo)
-    - Faz merge com Demonstrativo pelo demo_lote (mantendo competência do Demonstrativo)
-    - Calcula diffs e flags de conferência
-    """
-    if df_xml.empty:
-        return pd.DataFrame()
 
-    keys = _build_chave_concil(df_xml, demo_agg)
+def ler_demo_itens_pagto_xlsx(source, strip_zeros_codes: bool = False) -> pd.DataFrame:
+    """Lê planilha itemizada do Demonstrativo; detecta colunas por regex/heurística."""
+    xls = pd.ExcelFile(source, engine='openpyxl')
+    # escolher a planilha com "item" ou "análise"
+    sheet = None
+    for s in xls.sheet_names:
+        s_norm = s.strip().lower()
+        if 'item' in s_norm or 'analise' in s_norm or 'análise' in s_norm:
+            sheet = s
+            break
+    if sheet is None:
+        sheet = xls.sheet_names[0]
 
-    tmp = df_xml.copy()
-    tmp['demo_lote'] = keys['demo_lote']
-    tmp['chave_concil'] = keys['chave_concil']
+    df_raw = pd.read_excel(source, sheet_name=sheet, engine='openpyxl')
+    hdr = _find_header_row(df_raw)
+    df = df_raw.copy()
+    if hdr > 0:
+        df.columns = df_raw.iloc[hdr]
+        df = df_raw.iloc[hdr + 1:].reset_index(drop=True)
 
-    xml_lote = (
-        tmp.groupby(['chave_concil', 'demo_lote', 'tipo'], dropna=False)
-           .agg(qtde_arquivos=('arquivo', 'count'),
-                qtde_guias_xml=('qtde_guias', 'sum'),
-                valor_total_xml=('valor_total', 'sum'),
-                numero_lote_xml=('numero_lote', 'first'),
-                lote_arquivo=('lote_arquivo', 'first'))
-           .reset_index()
+    cols = [str(c) for c in df.columns]
+    pick = {k: _match_col(cols, v) for k, v in _COLMAPS.items()}
+
+    if not any(pick.get(c) for c in ['val_apres', 'val_glosa', 'val_pago', 'cod_proc']):
+        raise ValueError("Não identifiquei colunas itemizadas no Demonstrativo. Anexe um exemplo para mapeamento.")
+
+    def col(c): return pick.get(c)
+
+    out = pd.DataFrame({
+        'numero_lote': df[col('lote')] if col('lote') else None,
+        'competencia': df[col('competencia')] if col('competencia') else None,
+        'numeroGuiaPrestador': (df[col('guia_prest')] if col('guia_prest') else None),
+        'numeroGuiaOperadora': (df[col('guia_oper')] if col('guia_oper') else None),
+        'codigo_procedimento': df[col('cod_proc')] if col('cod_proc') else None,
+        'descricao_procedimento': df[col('desc_proc')] if col('desc_proc') else None,
+        'quantidade_apresentada': pd.to_numeric(df[col('qtd_apres')], errors='coerce') if col('qtd_apres') else 0.0,
+        'quantidade_paga': pd.to_numeric(df[col('qtd_paga')], errors='coerce') if col('qtd_paga') else 0.0,
+        'valor_apresentado': pd.to_numeric(df[col('val_apres')], errors='coerce') if col('val_apres') else 0.0,
+        'valor_glosa': pd.to_numeric(df[col('val_glosa')], errors='coerce') if col('val_glosa') else 0.0,
+        'valor_pago': pd.to_numeric(df[col('val_pago')], errors='coerce') if col('val_pago') else 0.0,
+        'motivo_glosa_codigo': df[col('motivo_cod')] if col('motivo_cod') else None,
+        'motivo_glosa_descricao': df[col('motivo_desc')] if col('motivo_desc') else None,
+    })
+
+    # normalizações
+    for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
+        if c in out.columns and out[c] is not None:
+            out[c] = out[c].astype(str).str.strip()
+
+    # códigos normalizados
+    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(
+        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
 
-    # Merge com demonstrativo preservando competência
-    demo_key = demo_agg.rename(columns={'numero_lote': 'demo_lote'}).copy()
+    for c in ['valor_apresentado', 'valor_glosa', 'valor_pago', 'quantidade_apresentada', 'quantidade_paga']:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
 
-    baixa = xml_lote.merge(
-        demo_key[['demo_lote', 'competencia', 'valor_apresentado', 'valor_apurado', 'valor_glosa']],
-        on='demo_lote', how='left'
-    )
+    # chaves
+    out['chave_prest'] = (out.get('numeroGuiaPrestador', '').astype(str).str.strip()
+                          + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
+    out['chave_oper']  = (out.get('numeroGuiaOperadora', '').astype(str).str.strip()
+                          + '__' + out['codigo_procedimento_norm'].astype(str).str.strip())
+    return out
 
-    baixa['apresentado_diff'] = (baixa['valor_total_xml'] - baixa['valor_apresentado']).fillna(0.0)
-    baixa['apresentado_confere'] = baixa['apresentado_diff'].abs() <= 0.01
-
-    baixa['liberado_plus_glosa'] = (baixa['valor_apurado'].fillna(0.0) + baixa['valor_glosa'].fillna(0.0))
-    baixa['demonstrativo_confere'] = (baixa['valor_apresentado'].fillna(0.0) - baixa['liberado_plus_glosa']).abs() <= 0.01
-
-    cols_order = [
-        'chave_concil', 'demo_lote', 'tipo', 'competencia',
-        'qtde_arquivos', 'qtde_guias_xml', 'valor_total_xml',
-        'valor_apresentado', 'valor_apurado', 'valor_glosa', 'liberado_plus_glosa',
-        'apresentado_diff', 'apresentado_confere', 'demonstrativo_confere',
-        'numero_lote_xml', 'lote_arquivo'
-    ]
-    baixa = baixa[[c for c in cols_order if c in baixa.columns]].sort_values(['demo_lote', 'tipo', 'competencia'], ignore_index=True)
-    return baixa
 
 # =========================================================
-# Export Excel
+# Conciliação item a item
 # =========================================================
-def _download_excel_button(df_resumo: pd.DataFrame, df_agg: pd.DataFrame, df_terceira: pd.DataFrame, label: str):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        (df_resumo if not df_resumo.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="Resumo por arquivo"
-        )
-        (df_agg if not df_agg.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="Agregado por lote"
-        )
-        sheet_name_3 = "Baixa por lote" if ('valor_total_xml' in df_terceira.columns) else "Auditoria"
-        (df_terceira if not df_terceira.empty else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name=sheet_name_3
-        )
+def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
+    linhas: List[Dict] = []
+    for f in xml_files:
+        if hasattr(f, 'seek'):
+            f.seek(0)
+        try:
+            linhas.extend(parse_itens_tiss_xml(f))
+        except Exception as e:
+            linhas.append({'arquivo': getattr(f, 'name', 'upload.xml'), 'erro': str(e)})
 
-        # Formatação de moeda nas abas
-        def format_currency_sheet(ws, header_row=1, currency_cols=()):
-            headers = {ws.cell(row=header_row, column=c).value: c for c in range(1, ws.max_column + 1)}
-            numfmt = 'R$ #,##0.00'
-            for col_name in currency_cols:
-                if col_name in headers:
-                    col_idx = headers[col_name]
-                    for r in range(header_row + 1, ws.max_row + 1):
-                        ws.cell(row=r, column=col_idx).number_format = numfmt
-
-        ws = writer.sheets.get("Resumo por arquivo")
-        if ws is not None:
-            format_currency_sheet(ws, currency_cols=("valor_total", "valor_glosado", "valor_liberado"))
-
-        ws = writer.sheets.get("Agregado por lote")
-        if ws is not None:
-            format_currency_sheet(ws, currency_cols=("valor_total",))
-
-        ws = writer.sheets.get("Baixa por lote") or writer.sheets.get("Auditoria")
-        if ws is not None:
-            if writer.sheets.get("Baixa por lote") is not None:
-                format_currency_sheet(ws, currency_cols=(
-                    "valor_total_xml", "valor_apresentado", "valor_apurado",
-                    "valor_glosa", "liberado_plus_glosa", "apresentado_diff"
-                ))
-            else:
-                format_currency_sheet(ws, currency_cols=("total_tag","subtotal_itens_proc","subtotal_itens_outras","subtotal_itens"))
-
-    st.download_button(
-        label,
-        data=buffer.getvalue(),
-        file_name="resumo_xml_tiss.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-def _auditar_alertas(df: pd.DataFrame) -> None:
-    if df.empty:
-        return
-    sus = df[df['suspeito']]
-    err = df[df['erro'].notna()] if 'erro' in df.columns else pd.DataFrame()
-
-    if not sus.empty:
-        st.warning(
-            f"⚠️ {len(sus)} arquivo(s) com valor_total=0 e qtde_guias>0. Verifique: "
-            + ", ".join(sus['arquivo'].tolist())[:500]
-        )
-    if not err.empty:
-        st.error(
-            f"❌ {len(err)} arquivo(s) com erro no parsing. Exemplos: "
-            + ", ".join(err['arquivo'].head(5).tolist())
-        )
-
-# =========================================================
-# 🔒 Banco acumulado de Demonstrativos (session_state)
-# =========================================================
-if 'demo_bank' not in st.session_state:
-    st.session_state.demo_bank = pd.DataFrame(
-        columns=['numero_lote', 'competencia', 'valor_apresentado', 'valor_apurado', 'valor_glosa', 'linhas']
-    )
-
-def _agg_demo(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante agregação por (numero_lote, competencia) após concatenação de múltiplos demonstrativos."""
+    df = pd.DataFrame(linhas)
     if df.empty:
         return df
-    df = df.copy()
-    return (df.groupby(['numero_lote', 'competencia'], dropna=False, as_index=False)
-              .agg(valor_apresentado=('valor_apresentado','sum'),
-                   valor_apurado=('valor_apurado','sum'),
-                   valor_glosa=('valor_glosa','sum'),
-                   linhas=('linhas','sum')))
 
-def _add_to_demo_bank(demo_new: pd.DataFrame):
-    bank = st.session_state.demo_bank
-    bank = pd.concat([bank, demo_new], ignore_index=True)
-    st.session_state.demo_bank = _agg_demo(bank)
+    # tipos numéricos
+    for c in ['quantidade', 'valor_unitario', 'valor_total']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
-def _clear_demo_bank():
-    st.session_state.demo_bank = st.session_state.demo_bank.iloc[0:0]
+    # normaliza código para chave
+    df['codigo_procedimento_norm'] = df['codigo_procedimento'].astype(str).map(
+        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
+    )
+
+    # chaves
+    df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
+                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
+    df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
+                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
+    return df
+
+
+def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
+    parts = []
+    for f in demo_files:
+        if hasattr(f, 'seek'):
+            f.seek(0)
+        parts.append(ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes))
+    if parts:
+        return pd.concat(parts, ignore_index=True)
+    return pd.DataFrame()
+
+
+def conciliar_itens(
+    df_xml: pd.DataFrame,
+    df_demo: pd.DataFrame,
+    tolerance_valor: float = 0.02,
+    fallback_por_descricao: bool = False,
+) -> Dict[str, pd.DataFrame]:
+    """
+    1) match por chave_prest
+    2) não casados → match por chave_oper
+    3) opcional: fallback por descrição + tolerância de valor
+    """
+    # 1) Prestador
+    m1 = df_xml.merge(df_demo, on='chave_prest', how='left', suffixes=('_xml', '_demo'))
+    m1['matched_on'] = m1['valor_apresentado'].notna().map({True: 'prestador', False: ''})
+
+    # 2) Operadora
+    not_match = m1[m1['matched_on'].eq('')].copy()
+    still_xml = not_match[['arquivo', 'numero_lote', 'tipo_guia', 'numeroGuiaPrestador', 'numeroGuiaOperadora',
+                           'paciente', 'medico', 'data_atendimento', 'tipo_item', 'identificadorDespesa',
+                           'codigo_tabela', 'codigo_procedimento', 'codigo_procedimento_norm',
+                           'descricao_procedimento', 'quantidade', 'valor_unitario', 'valor_total',
+                           'chave_oper', 'chave_prest']]
+    m2 = still_xml.merge(df_demo, on='chave_oper', how='left', suffixes=('_xml', '_demo'))
+    m2['matched_on'] = m2['valor_apresentado'].notna().map({True: 'operadora', False: ''})
+
+    conc = pd.concat([m1[m1['matched_on'] != ''], m2[m2['matched_on'] != '']], ignore_index=True)
+
+    # 3) Fallback por descrição (opcional)
+    fallback_matches = pd.DataFrame()
+    if fallback_por_descricao:
+        rem_xml = pd.concat([m1[m1['matched_on'] == ''], m2[m2['matched_on'] == '']], ignore_index=True)
+        if not rem_xml.empty:
+            # chaves por guia + descrição — tolerância por valor
+            # Fazemos join por guia (prestador primeiro, senão operadora) + descricao_procedimento
+            rem_xml['guia_join'] = rem_xml.apply(
+                lambda r: r['numeroGuiaPrestador'] if str(r.get('numeroGuiaPrestador', '')).strip() else str(r.get('numeroGuiaOperadora', '')).strip(),
+                axis=1
+            )
+            df_demo2 = df_demo.copy()
+            df_demo2['guia_join'] = df_demo2.apply(
+                lambda r: r['numeroGuiaPrestador'] if str(r.get('numeroGuiaPrestador', '')).strip() else str(r.get('numeroGuiaOperadora', '')).strip(),
+                axis=1
+            )
+            tmp = rem_xml.merge(
+                df_demo2,
+                on=['guia_join', 'descricao_procedimento'],
+                how='left',
+                suffixes=('_xml', '_demo')
+            )
+            # filtro por tolerância de valor apresentado x valor_total
+            tol = float(tolerance_valor)
+            keep = (tmp['valor_apresentado'].notna()) & ((tmp['valor_total'] - tmp['valor_apresentado']).abs() <= tol)
+            fallback_matches = tmp[keep].copy()
+            if not fallback_matches.empty:
+                fallback_matches['matched_on'] = 'descricao+valor'
+                conc = pd.concat([conc, fallback_matches], ignore_index=True)
+
+    # não casados finais
+    unmatch = pd.concat(
+        [
+            m1[m1['matched_on'] == ''],
+            m2[m2['matched_on'] == ''],
+            fallback_matches[fallback_matches.get('matched_on', '') == ''].copy() if not fallback_matches.empty else pd.DataFrame()
+        ],
+        ignore_index=True
+    )
+    if not unmatch.empty:
+        unmatch = unmatch.drop_duplicates(
+            subset=['arquivo', 'numero_lote', 'tipo_guia', 'numeroGuiaPrestador', 'codigo_procedimento', 'valor_total']
+        )
+
+    # diffs
+    if not conc.empty:
+        conc['apresentado_diff'] = conc['valor_total'] - conc['valor_apresentado']
+        conc['glosa_pct'] = conc.apply(
+            lambda r: (r['valor_glosa'] / r['valor_apresentado']) if (r.get('valor_apresentado', 0) and r['valor_apresentado'] > 0) else 0.0,
+            axis=1
+        )
+
+    return {
+        'conciliacao': conc,
+        'nao_casados': unmatch
+    }
+
 
 # =========================================================
-# Upload
+# Auditoria (duplicidade de guia & retorno em dias)
 # =========================================================
-with tab1:
-    files = st.file_uploader("Selecione um ou mais arquivos XML TISS", type=['xml'], accept_multiple_files=True)
-    demo_files = st.file_uploader("Opcional: Demonstrativos (.xlsx)", type=['xlsx'], accept_multiple_files=True, key="demo_upload_tab1")
+def build_chave_guia(tipo: str, numeroGuiaPrestador: str, numeroGuiaOperadora: str) -> Optional[str]:
+    t = (tipo or '').upper()
+    if t in ('CONSULTA', 'SADT'):
+        return str(numeroGuiaPrestador).strip() if numeroGuiaPrestador else None
+    return None  # (Recurso não entra aqui; auditoria baseada em XML de guias assistenciais)
 
-    st.markdown("### Banco de Demonstrativos (acumulado)")
-    bcol1, bcol2, bcol3 = st.columns([1,1,2])
-    with bcol1:
-        add_disabled = not bool(demo_files)
-        if st.button("➕ Adicionar demonstrativo(s) ao banco", disabled=add_disabled, use_container_width=True, key="add_demo_tab1"):
-            try:
-                demos = []
-                for f in demo_files:
-                    if hasattr(f, 'seek'):
-                        f.seek(0)
-                    demos.append(ler_demonstrativo_pagto_xlsx(f))
-                if demos:
-                    _add_to_demo_bank(pd.concat(demos, ignore_index=True))
-                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). Lotes únicos: {st.session_state.demo_bank['numero_lote'].nunique()}")
-            except Exception as e:
-                st.error(f"Erro ao processar demonstrativo(s): {e}")
-    with bcol2:
-        if st.button("🗑️ Limpar banco", use_container_width=True, key="clear_demo_tab1"):
-            _clear_demo_bank()
-            st.info("Banco limpo.")
-    with bcol3:
-        if not st.session_state.demo_bank.empty:
-            lotes = st.session_state.demo_bank['numero_lote'].nunique()
-            st.caption(f"**{lotes}** lote(s) no banco.")
 
-    demo_agg_in_use = st.session_state.demo_bank.copy()
+def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.DataFrame:
+    """Reduz itens → nível guia e audita duplicidade/retorno."""
+    if df_xml_itens.empty:
+        return pd.DataFrame()
 
-    if files:
-        resultados: List[Dict] = []
-        for f in files:
-            try:
-                if hasattr(f, "seek"):
-                    f.seek(0)
-                res = parse_tiss_xml(f)
-                res['arquivo'] = f.name
-                if 'erro' not in res:
-                    res['erro'] = None
-            except Exception as e:
-                res = {'arquivo': f.name, 'numero_lote': '', 'tipo': 'DESCONHECIDO', 'qtde_guias': 0, 'valor_total': Decimal('0'), 'estrategia_total': 'erro', 'parser_version': PARSER_VERSION, 'erro': str(e)}
-            resultados.append(res)
+    base_cols = [
+        'arquivo', 'numero_lote', 'tipo_guia',
+        'numeroGuiaPrestador', 'numeroGuiaOperadora',
+        'paciente', 'medico', 'data_atendimento'
+    ]
+    base = df_xml_itens[base_cols].drop_duplicates().copy()
+    base['chave_guia'] = base.apply(
+        lambda r: build_chave_guia(r['tipo_guia'], r['numeroGuiaPrestador'], r['numeroGuiaOperadora']),
+        axis=1
+    )
+    base['duplicada'] = False
+    base['arquivos_duplicados'] = ''
+    base['lotes_duplicados'] = ''
+    base['retorno_no_periodo'] = False
+    base['retorno_ref'] = ''
+    base['status_auditoria'] = ''
 
-        if resultados:
-            df = pd.DataFrame(resultados)
-            df = _df_format(df)
+    # mapa por chave
+    mapa = {}
+    for i, r in base.iterrows():
+        k = r.get('chave_guia')
+        if not k:
+            continue
+        mapa.setdefault(k, []).append((i, r.get('numero_lote', ''), r.get('arquivo', '')))
 
-            st.subheader("Resumo por arquivo (XML)")
-            st.dataframe(_df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado']), use_container_width=True)
+    # duplicidade
+    for i, r in base.iterrows():
+        k = r.get('chave_guia')
+        if not k or k not in mapa:
+            continue
+        outros = [(j, lot, arq) for (j, lot, arq) in mapa[k] if j != i]
+        if outros:
+            base.loc[i, 'duplicada'] = True
+            base.loc[i, 'lotes_duplicados'] = ",".join(sorted({o[1] for o in outros if o[1]}))
+            base.loc[i, 'arquivos_duplicados'] = ",".join(sorted({o[2] for o in outros if o[2]}))
 
-            baixa_upload = pd.DataFrame()
-            if not demo_agg_in_use.empty:
-                baixa_upload = _make_baixa_por_lote(df, demo_agg_in_use)
-                if not baixa_upload.empty:
-                    st.subheader("Baixa por nº do lote (XML × Demonstrativo) — separa faturamento e recurso")
-                    baixa_disp = baixa_upload.copy()
-                    for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
-                              'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
-                        if c in baixa_disp.columns:
-                             baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)
-                    st.dataframe(baixa_disp, use_container_width=True)
+    # retorno (paciente + médico ± prazo em dias)
+    datas = {i: parse_date_flex(str(r.get('data_atendimento') or '').strip()) for i, r in base.iterrows()}
+    if prazo_retorno and prazo_retorno > 0:
+        for i, r in base.iterrows():
+            pac = (r.get('paciente') or '').strip()
+            med = (r.get('medico') or '').strip()
+            d0 = datas.get(i)
+            if not pac or not med or not d0:
+                continue
+            candidatos = base[(base.index != i)
+                              & (base['paciente'].fillna('').str.strip() == pac)
+                              & (base['medico'].fillna('').str.strip() == med)]
+            refs = []
+            for j, rr in candidatos.iterrows():
+                dj = datas.get(j)
+                if not dj:
+                    continue
+                if abs((d0 - dj).days) <= prazo_retorno:
+                    refs.append(f"{rr.get('numero_lote','')}@{rr.get('arquivo','')}@{(rr.get('data_atendimento') or '')}")
+            if refs:
+                base.loc[i, 'retorno_no_periodo'] = True
+                base.loc[i, 'retorno_ref'] = " | ".join(refs)
 
-            st.subheader("Agregado por nº do lote e tipo (XML)")
-            agg = _make_agg(df)
-            st.dataframe(_df_display_currency(agg, ['valor_total']), use_container_width=True)
+    # status
+    for i, r in base.iterrows():
+        status = []
+        if r['duplicada']:
+            status.append("Duplicidade")
+        if r['retorno_no_periodo']:
+            status.append("Retorno")
+        base.loc[i, 'status_auditoria'] = " + ".join(status) if status else "OK"
 
-            # =========================================================
-            # Auditoria por guia e Comparar/remover duplicadas (com keys únicas)
-            # =========================================================
-            with st.expander("🔎 Auditoria por guia (opcional)"):
-                arquivo_escolhido = st.selectbox("Selecione um arquivo enviado", options=[r['arquivo'] for r in resultados], key="auditoria_select")
-                if st.button("Gerar auditoria do arquivo selecionado", type="primary", key="auditoria_btn"):
-                    escolhido = next((f for f in files if f.name == arquivo_escolhido), None)
-                    if escolhido is not None:
-                        if hasattr(escolhido, "seek"):
-                            escolhido.seek(0)
-                        linhas = audit_por_guia(escolhido)
-                        df_a = pd.DataFrame(linhas)
-                        df_a_disp = df_a.copy()
-                        for c in ('total_tag', 'subtotal_itens_proc', 'subtotal_itens_outras', 'subtotal_itens'):
-                            if c in df_a_disp.columns:
-                                df_a_disp[c] = df_a_disp[c].apply(format_currency_br)
-                        st.dataframe(df_a_disp, use_container_width=True)
-                        st.download_button("Baixar auditoria (CSV)", df_a.to_csv(index=False).encode('utf-8'), file_name=f"auditoria_{arquivo_escolhido}.csv", mime="text/csv", key="auditoria_download")
+    return base
 
-            with st.expander("🧩 Comparar XML e remover guias duplicadas"):
-                arquivo_base = st.selectbox("Selecione o arquivo base", options=[r['arquivo'] for r in resultados], key="comparar_select")
-                if st.button("Remover guias duplicadas do arquivo base", type="primary", key="comparar_btn"):
-                    base_file = next((f for f in files if f.name == arquivo_base), None)
-                    outros_files = [f for f in files if f.name != arquivo_base]
 
-                    if base_file is None or not outros_files:
-                        st.warning("É necessário selecionar um arquivo base e ter outros arquivos para comparar.")
-                    else:
-                        if hasattr(base_file, "seek"):
-                            base_file.seek(0)
-                        guias_base = audit_por_guia(base_file)
+# =========================================================
+# UI — Sidebar (parâmetros)
+# =========================================================
+with st.sidebar:
+    st.header("Parâmetros")
+    prazo_retorno = st.number_input("Prazo de retorno (dias)", min_value=0, value=30, step=1)
+    tolerance_valor = st.number_input("Tolerância p/ fallback por descrição (R$)", min_value=0.00, value=0.02, step=0.01, format="%.2f")
+    fallback_desc = st.toggle("Fallback de conciliação por descrição + valor (quando código não casar)", value=False)
+    strip_zeros_codes = st.toggle("Normalizar códigos removendo zeros à esquerda", value=True)
 
-                        guias_outros = []
-                        for f in outros_files:
-                            if hasattr(f, "seek"):
-                                f.seek(0)
-                            guias_outros.extend(audit_por_guia(f))
+# =========================================================
+# UI — Uploads
+# =========================================================
+st.subheader("Upload de arquivos")
+xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True)
+demo_files = st.file_uploader("Demonstrativo(s) de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True)
 
-                        duplicadas = []
-                        for g in guias_base:
-                            chave = None
-                            if g['tipo'] in ('CONSULTA', 'SADT'):
-                                chave = g.get('numeroGuiaPrestador')
-                            elif g['tipo'] == 'RECURSO':
-                                chave = g.get('numeroGuiaOrigem') or g.get('numeroGuiaOperadora')
-                            if chave:
-                                for o in guias_outros:
-                                    chave_outro = None
-                                    if o['tipo'] in ('CONSULTA', 'SADT'):
-                                        chave_outro = o.get('numeroGuiaPrestador')
-                                    elif o['tipo'] == 'RECURSO':
-                                        chave_outro = o.get('numeroGuiaOrigem') or o.get('numeroGuiaOperadora')
-                                    if chave_outro == chave:
-                                        duplicadas.append(g)
-                                        break
+if st.button("Processar", type="primary"):
+    # 1) XML → Itens
+    df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
+    if df_xml.empty:
+        st.warning("Nenhum item extraído do(s) XML(s).")
+    else:
+        st.subheader("Itens extraídos do XML (Consulta / SP‑SADT)")
+        st.dataframe(apply_currency(df_xml, ['valor_unitario', 'valor_total']), use_container_width=True, height=420)
 
-                        if not duplicadas:
-                            st.success("Nenhuma guia duplicada encontrada.")
-                        else:
-                            st.warning(f"{len(duplicadas)} guia(s) duplicada(s) encontrada(s).")
-                            df_dup = pd.DataFrame(duplicadas)
-                            st.dataframe(df_dup, use_container_width=True)
+    # 2) Demonstrativo → Itens
+    df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
+    if df_demo.empty:
+        st.info("Nenhum demonstrativo válido carregado (ou sem colunas itemizadas).")
+    else:
+        st.subheader("Itens do Demonstrativo (detectados)")
+        st.dataframe(apply_currency(df_demo, ['valor_apresentado', 'valor_glosa', 'valor_pago']), use_container_width=True, height=420)
 
-                            from lxml import etree
-                            base_file.seek(0)
-                            parser = etree.XMLParser(remove_blank_text=True)
-                            tree = etree.parse(base_file, parser)
-                            root = tree.getroot()
+    # 3) Conciliação
+    if not df_xml.empty and not df_demo.empty:
+        result = conciliar_itens(
+            df_xml=df_xml,
+            df_demo=df_demo,
+            tolerance_valor=float(tolerance_valor),
+            fallback_por_descricao=fallback_desc
+        )
+        conc = result['conciliacao']
+        unmatch = result['nao_casados']
 
-                            def remover_guias(root, duplicadas):
-                                for dup in duplicadas:
-                                    tipo = dup['tipo']
-                                    chave = dup.get('numeroGuiaPrestador') or dup.get('numeroGuiaOrigem') or dup.get('numeroGuiaOperadora')
-                                    if not chave:
-                                        continue
-                                    if tipo == 'CONSULTA':
-                                        for guia in root.xpath('.//ans:guiaConsulta', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                            num = guia.find('.//ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                            if num is not None and (num.text or '').strip() == chave:
-                                                guia.getparent().remove(guia)
-                                    elif tipo == 'SADT':
-                                        for guia in root.xpath('.//ans:guiaSP-SADT', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                            num = guia.find('.//ans:cabecalhoGuia/ans:numeroGuiaPrestador', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                            if num is not None and (num.text or '').strip() == chave:
-                                                guia.getparent().remove(guia)
-                                    elif tipo == 'RECURSO':
-                                        for guia in root.xpath('.//ans:recursoGuia', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}):
-                                            num = guia.find('.//ans:numeroGuiaOrigem', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                            num2 = guia.find('.//ans:numeroGuiaOperadora', namespaces={'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'})
-                                            if ((num is not None and (num.text or '').strip() == chave) or (num2 is not None and (num2.text or '').strip() == chave)):
-                                                guia.getparent().remove(guia)
-                                return root
+        st.subheader("Conciliação item a item (XML × Demonstrativo)")
+        conc_disp = apply_currency(conc.copy(), ['valor_unitario', 'valor_total', 'valor_apresentado', 'valor_glosa', 'valor_pago', 'apresentado_diff'])
+        st.dataframe(conc_disp, use_container_width=True, height=480)
 
-                            root = remover_guias(root, duplicadas)
-                            buffer_xml = io.BytesIO()
-                            tree.write(buffer_xml, encoding="utf-8", xml_declaration=True, pretty_print=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Itens casados", len(conc))
+        with c2:
+            st.metric("Itens não casados", len(unmatch))
 
-                            st.download_button("Baixar XML sem duplicadas", data=buffer_xml.getvalue(), file_name=f"{arquivo_base.replace('.xml','')}_sem_duplicadas.xml", mime="application/xml", key="comparar_download")
+        if not unmatch.empty:
+            st.markdown("**Itens não casados**")
+            st.dataframe(apply_currency(unmatch.copy(), ['valor_unitario', 'valor_total']), use_container_width=True, height=320)
 
-            # --- Downloads também na aba Upload (espelhando a aba Pasta) ---
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.download_button(
-                    "Baixar resumo (CSV)",
-                    df.to_csv(index=False).encode('utf-8'),
-                    file_name="resumo_xml_tiss.csv",
-                    mime="text/csv",
-                    key="csv_upload"
+        # 4) Indicadores
+        st.markdown("---")
+        st.subheader("📊 Indicadores & Rankings")
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            st.markdown("#### Motivos de Glosa (Top)")
+            if 'motivo_glosa_codigo' in conc.columns or 'motivo_glosa_descricao' in conc.columns:
+                mot = (conc.groupby(['motivo_glosa_codigo', 'motivo_glosa_descricao'], dropna=False, as_index=False)
+                       .agg(valor_glosa=('valor_glosa', 'sum'),
+                            valor_apresentado=('valor_apresentado', 'sum'),
+                            itens=('codigo_procedimento', 'count')))
+                mot['glosa_pct'] = mot.apply(
+                    lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1
                 )
-            with col2:
-                _download_excel_button(df, agg, baixa_upload if not baixa_upload.empty else df, "Baixar resumo (Excel .xlsx)")
-            with col3:
-                st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria/Baixa (moeda BR).")
-
-# =========================================================
-# Pasta local (útil para rodar local/clonado)
-# =========================================================
-with tab2:
-    pasta = st.text_input(
-        "Caminho da pasta com XMLs (ex.: ./data ou C:\\repos\\tiss-xmls)",
-        value="./data"
-    )
-    st.caption("Esta aba reutiliza o mesmo **banco de demonstrativos** da aba de Upload (acumulado).")
-
-    demo_files_local = st.file_uploader(
-        "Adicionar mais Demonstrativos (.xlsx) ao banco (opcional)",
-        type=['xlsx'],
-        accept_multiple_files=True,
-        key="demo_upload_tab2"
-    )
-    lcol1, lcol2 = st.columns([1,1])
-    with lcol1:
-        add_disabled_local = not bool(demo_files_local)
-        if st.button("➕ Adicionar demonstrativo(s) ao banco (aba Pasta)", disabled=add_disabled_local, use_container_width=True, key="add_demo_tab2"):
-            try:
-                demos = []
-                for f in demo_files_local:
-                    if hasattr(f, 'seek'):
-                        f.seek(0)
-                    demos.append(ler_demonstrativo_pagto_xlsx(f))
-                if demos:
-                    _add_to_demo_bank(pd.concat(demos, ignore_index=True))
-                    st.success(f"{len(demos)} demonstrativo(s) adicionado(s). "
-                               f"Lotes únicos no banco: {st.session_state.demo_bank['numero_lote'].nunique()}")
-            except Exception as e:
-                st.error(f"Erro ao processar demonstrativo(s): {e}")
-    with lcol2:
-        if st.button("🗑️ Limpar banco (aba Pasta)", use_container_width=True, key="clear_demo_tab2"):
-            _clear_demo_bank()
-            st.info("Banco de demonstrativos limpo.")
-
-    if st.button("Ler pasta", key="ler_pasta"):
-        p = Path(pasta)
-        if not p.exists():
-            st.error("Pasta não encontrada.")
-        else:
-            xmls = list(p.glob("*.xml"))
-            if not xmls:
-                st.warning("Nenhum .xml encontrado nessa pasta.")
+                mot = mot.sort_values(['glosa_pct', 'valor_glosa'], ascending=[False, False]).head(50)
+                st.dataframe(apply_currency(mot, ['valor_glosa', 'valor_apresentado']), use_container_width=True)
             else:
-                resultados = parse_many_xmls(xmls)
-                df = pd.DataFrame(resultados)
-                df = _df_format(df)
+                st.info("Motivo de glosa não presente no demonstrativo.")
 
-                demo_agg_in_use = st.session_state.demo_bank.copy()
+        with colB:
+            st.markdown("#### Procedimentos com maior índice de Glosa")
+            if not conc.empty:
+                proc = (conc.groupby(['codigo_procedimento', 'descricao_procedimento'], dropna=False, as_index=False)
+                        .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                             valor_glosa=('valor_glosa', 'sum'),
+                             valor_pago=('valor_pago', 'sum'),
+                             itens=('arquivo', 'count')))
+                proc['glosa_pct'] = proc.apply(
+                    lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1
+                )
+                proc = proc.sort_values(['glosa_pct', 'valor_glosa'], ascending=[False, False]).head(50)
+                st.dataframe(apply_currency(proc, ['valor_apresentado', 'valor_glosa', 'valor_pago']), use_container_width=True)
+            else:
+                st.info("Sem dados conciliados para ranking de procedimentos.")
 
-                baixa_local = pd.DataFrame()
-                if not demo_agg_in_use.empty:
-                    df_keys = _build_chave_concil(df, demo_agg_in_use)
+        # Rankings adicionais
+        colC, colD = st.columns(2)
+        with colC:
+            st.markdown("#### Médicos com maior glosa")
+            med = (conc.groupby(['medico'], dropna=False, as_index=False)
+                   .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                        valor_glosa=('valor_glosa', 'sum'),
+                        valor_pago=('valor_pago', 'sum'),
+                        itens=('arquivo', 'count')))
+            med['glosa_pct'] = med.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+            med = med.sort_values(['glosa_pct', 'valor_glosa'], ascending=[False, False]).head(50)
+            st.dataframe(apply_currency(med, ['valor_apresentado', 'valor_glosa', 'valor_pago']), use_container_width=True)
 
-                    demo_by_lote = (demo_agg_in_use.groupby('numero_lote', as_index=False)
-                                    .agg(valor_apresentado=('valor_apresentado','sum'),
-                                         valor_apurado=('valor_apurado','sum'),
-                                         valor_glosa=('valor_glosa','sum')))
+        with colD:
+            st.markdown("#### Lotes com maior glosa")
+            lot = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
+                   .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                        valor_glosa=('valor_glosa', 'sum'),
+                        valor_pago=('valor_pago', 'sum'),
+                        itens=('arquivo', 'count')))
+            lot['glosa_pct'] = lot.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+            lot = lot.sort_values(['glosa_pct', 'valor_glosa'], ascending=[False, False]).head(50)
+            st.dataframe(apply_currency(lot, ['valor_apresentado', 'valor_glosa', 'valor_pago']), use_container_width=True)
 
-                    map_apres   = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_apresentado']))
-                    map_apurado = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_apurado']))
-                    map_glosa   = dict(zip(demo_by_lote['numero_lote'], demo_by_lote['valor_glosa']))
+        # 5) Auditoria por guia (duplicidade e retorno)
+        st.markdown("---")
+        st.subheader("🔎 Auditoria por Guia (duplicidade e retorno)")
+        df_aud = auditar_guias(df_xml, prazo_retorno=prazo_retorno)
+        if df_aud.empty:
+            st.info("Sem dados para auditoria (verifique os XML).")
+        else:
+            st.dataframe(df_aud, use_container_width=True, height=420)
 
-                    df['numero_lote_norm'] = df_keys['numero_lote_norm']
-                    df['lote_arquivo_norm'] = df_keys['lote_arquivo_norm']
-                    df['demo_lote'] = df_keys['demo_lote']
-                    df['chave_concil'] = df_keys['chave_concil']
+        # 6) Export Excel consolidado
+        st.markdown("---")
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as wr:
+            (df_xml if not df_xml.empty else pd.DataFrame()).to_excel(wr, index=False, sheet_name='Itens_XML')
+            (df_demo if not df_demo.empty else pd.DataFrame()).to_excel(wr, index=False, sheet_name='Itens_Demo')
+            (conc if not conc.empty else pd.DataFrame()).to_excel(wr, index=False, sheet_name='Conciliação')
+            (unmatch if not unmatch.empty else pd.DataFrame()).to_excel(wr, index=False, sheet_name='Nao_Casados')
 
-                    df['valor_glosado']  = df['demo_lote'].map(map_glosa).fillna(df['valor_glosado']).fillna(0.0)
-                    df['valor_liberado'] = df['demo_lote'].map(map_apurado).fillna(df['valor_liberado']).fillna(0.0)
-                    df['valor_apresentado_demo'] = df['demo_lote'].map(map_apres).fillna(0.0)
+            if not conc.empty:
+                mot_x = (conc.groupby(['motivo_glosa_codigo', 'motivo_glosa_descricao'], dropna=False, as_index=False)
+                         .agg(valor_glosa=('valor_glosa', 'sum'),
+                              valor_apresentado=('valor_apresentado', 'sum'),
+                              itens=('codigo_procedimento', 'count')))
+                mot_x['glosa_pct'] = mot_x.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+                mot_x.to_excel(wr, index=False, sheet_name='Motivos_Glosa')
 
-                    baixa_local = _make_baixa_por_lote(df, demo_agg_in_use)
+                proc_x = (conc.groupby(['codigo_procedimento', 'descricao_procedimento'], dropna=False, as_index=False)
+                          .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                               valor_glosa=('valor_glosa', 'sum'),
+                               valor_pago=('valor_pago', 'sum'),
+                               itens=('arquivo', 'count')))
+                proc_x['glosa_pct'] = proc_x.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+                proc_x.to_excel(wr, index=False, sheet_name='Procedimentos_Glosa')
 
-                df_disp = _df_display_currency(df, ['valor_total', 'valor_glosado', 'valor_liberado', 'valor_apresentado_demo'])
+                med_x = (conc.groupby(['medico'], dropna=False, as_index=False)
+                         .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                              valor_glosa=('valor_glosa', 'sum'),
+                              valor_pago=('valor_pago', 'sum'),
+                              itens=('arquivo', 'count')))
+                med_x['glosa_pct'] = med_x.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+                med_x.to_excel(wr, index=False, sheet_name='Medicos')
 
-                st.subheader("Resumo por arquivo")
-                st.dataframe(df_disp, use_container_width=True)
+                lot_x = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
+                         .agg(valor_apresentado=('valor_apresentado', 'sum'),
+                              valor_glosa=('valor_glosa', 'sum'),
+                              valor_pago=('valor_pago', 'sum'),
+                              itens=('arquivo', 'count')))
+                lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa'] / r['valor_apresentado']) if r['valor_apresentado'] > 0 else 0.0, axis=1)
+                lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
-                st.subheader("Agregado por nº do lote e tipo")
-                agg = _make_agg(df)
-                agg_disp = _df_display_currency(agg, ['valor_total'])
-                st.dataframe(agg_disp, use_container_width=True)
+            (df_aud if not df_aud.empty else pd.DataFrame()).to_excel(wr, index=False, sheet_name='Auditoria_Guias')
 
-                if not baixa_local.empty:
-                    st.subheader("Baixa por nº do lote (XML × Demonstrativo) — separa faturamento e recurso")
-                    baixa_disp = baixa_local.copy()
-                    for c in ['valor_total_xml', 'valor_apresentado', 'valor_apurado',
-                              'valor_glosa', 'liberado_plus_glosa', 'apresentado_diff']:
-                        if c in baixa_disp.columns:
-                            baixa_disp[c] = baixa_disp[c].fillna(0.0).apply(format_currency_br)
-                    st.dataframe(baixa_disp, use_container_width=True)
+            # ajustes (largura + congela cabeçalho)
+            for name in wr.sheets:
+                ws = wr.sheets[name]
+                ws.freeze_panes = "A2"
+                for col in ws.columns:
+                    try:
+                        col_letter = col[0].column_letter
+                    except Exception:
+                        continue
+                    max_len = 12
+                    for cell in col:
+                        v = cell.value
+                        if v is None:
+                            continue
+                        s = str(v)
+                        if len(s) > max_len:
+                            max_len = len(s)
+                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
 
-                _auditar_alertas(df)
+        st.download_button(
+            "Baixar Excel consolidado",
+            data=buf.getvalue(),
+            file_name="tiss_itens_conciliacao_auditoria.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.download_button(
-                        "Baixar resumo (CSV)",
-                        df.to_csv(index=False).encode('utf-8'),
-                        file_name="resumo_xml_tiss.csv",
-                        mime="text/csv",
-                        key="csv_local"
-                    )
-                with col2:
-                    _download_excel_button(df, agg, baixa_local if not baixa_local.empty else df, "Baixar resumo (Excel .xlsx)")
-                with col3:
-                    st.caption("O Excel inclui as abas: Resumo, Agregado e Auditoria/Baixa (moeda BR).")
+    else:
+        st.info("Para conciliação, carregue ao menos um XML e um Demonstrativo.")
