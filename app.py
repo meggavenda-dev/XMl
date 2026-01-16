@@ -724,14 +724,27 @@ def motivos_glosa(df_conc: pd.DataFrame, competencia: Optional[str] = None) -> p
     base = df_conc.copy()
     if base.empty:
         return base
+        
+    # 1. Filtro de competência (se houver)
     if competencia and 'competencia' in base.columns:
         base = base[base['competencia'] == competencia]
-    mot = (base.groupby(['motivo_glosa_codigo','motivo_glosa_descricao'], dropna=False, as_index=False)
-           .agg(valor_glosa=('valor_glosa','sum'),
-                valor_apresentado=('valor_apresentado','sum'),
-                itens=('codigo_procedimento','count')))
-    mot['glosa_pct'] = mot.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-    return mot.sort_values(['valor_glosa','glosa_pct'], ascending=[False, False])
+    
+    # 2. FILTRO CRÍTICO: Considerar apenas linhas onde houve glosa de fato
+    base = base[base['valor_glosa'] > 0]
+    
+    if base.empty:
+        return pd.DataFrame()
+
+    # 3. Agrupamento
+    mot = (base.groupby(['motivo_glosa_codigo', 'motivo_glosa_descricao'], dropna=False, as_index=False)
+           .agg(valor_glosa=('valor_glosa', 'sum'),
+                itens_atingidos=('codigo_procedimento', 'count')))
+    
+    # 4. Cálculo de representatividade
+    total_geral_glosado = mot['valor_glosa'].sum()
+    mot['share_glosa_pct'] = (mot['valor_glosa'] / total_geral_glosado) * 100
+    
+    return mot.sort_values('valor_glosa', ascending=False)
 
 def outliers_por_procedimento(df_conc: pd.DataFrame, k: float = 1.5) -> pd.DataFrame:
     base = df_conc[['codigo_procedimento','descricao_procedimento','valor_apresentado']].dropna().copy()
