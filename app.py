@@ -363,7 +363,7 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
 
     # 7) Criação das Chaves de Conciliação
     df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
-    df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
+    df["chave_prest"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
     df["chave_oper"] = df["chave_prest"]
 
     # 8) Tratamento da Glosa (separar código de texto)
