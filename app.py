@@ -212,6 +212,12 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     for guia in root.findall('.//ans:guiaConsulta', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        
+        # Tenta pegar a guia da operadora se existir no XML de consulta
+        numero_guia_oper = tx(guia.find('ans:numeroGuiaOperadora', ANS_NS))
+        if not numero_guia_oper:
+            numero_guia_oper = numero_guia_prest # Se não tiver, usa a do prestador
+            
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
@@ -221,7 +227,7 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
                 'numero_lote': numero_lote,
                 'tipo_guia': 'CONSULTA',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': '',
+                'numeroGuiaOperadora': numero_guia_oper, # CAMPO CORRIGIDO
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
@@ -554,7 +560,7 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
-                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
+                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
     df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
     return df
