@@ -230,7 +230,11 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS)) if cab is not None else ''
+        # NOVA LÓGICA: primeiro busca na raiz da guia
+        numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        # Se não achou, tenta dentro do cabecalhoGuia
+        if not numero_guia_prest and cab is not None:
+            numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
         numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
@@ -304,7 +308,22 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
-    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].astype(str).str.strip()
+
+    # Item 3 aplicado: remover zeros à esquerda no número da guia
+    df['numeroGuiaPrestador'] = (
+        df['numeroGuiaPrestador']
+        .astype(str)
+        .str.strip()
+        .str.lstrip('0')
+    )
+
+    df['numeroGuiaOperadora'] = (
+        df['numeroGuiaOperadora']
+        .astype(str)
+        .str.strip()
+        .str.lstrip('0')
+    )
+
     df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
     df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
     df["chave_oper"] = df["numeroGuiaOperadora"] + "__" + df["codigo_procedimento_norm"]
