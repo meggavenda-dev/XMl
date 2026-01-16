@@ -1,350 +1,305 @@
 
+# file: tiss_items_parser.py
 from __future__ import annotations
 
-from decimal import Decimal
+from typing import IO, Union, List, Dict, Optional, Tuple
 from pathlib import Path
-from typing import IO, Union, List, Dict
+from decimal import Decimal
+import re
+import pandas as pd
 import xml.etree.ElementTree as ET
 
-# Namespace TISS
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
-
-__version__ = "2026.01.15-ptbr-08"
-
-
-class TissParsingError(Exception):
-    """Erro de parsing para arquivos TISS XML."""
-    pass
-
+DEC_ZERO = Decimal('0')
 
 # ----------------------------
-# Helpers
+# Helpers XML
 # ----------------------------
-def _dec(txt: str | None) -> Decimal:
-    """Converte string numérica para Decimal; vazio/None => 0. Troca ',' por '.' por segurança."""
-    if not txt:
-        return Decimal('0')
-    return Decimal(txt.strip().replace(',', '.'))
+def _dec(txt: Optional[str]) -> Decimal:
+    if txt is None:
+        return DEC_ZERO
+    s = str(txt).strip().replace(',', '.')
+    return Decimal(s) if s else DEC_ZERO
 
+def _tx(el: Optional[ET.Element]) -> str:
+    return (el.text or '').strip() if (el is not None and el.text) else ''
 
-def _get_text(root_or_el: ET.Element, xpath: str) -> str:
-    """Retorna texto de um xpath (com namespace TISS), ou string vazia se não existir / sem texto."""
-    el = root_or_el.find(xpath, ANS_NS)
-    return (el.text or '').strip() if el is not None and el.text else ''
+def _find(root: ET.Element, xp: str) -> Optional[ET.Element]:
+    return root.find(xp, ANS_NS)
 
-
-def _is_consulta(root: ET.Element) -> bool:
-    return root.find('.//ans:guiaConsulta', ANS_NS) is not None
-
-
-def _is_sadt(root: ET.Element) -> bool:
-    return root.find('.//ans:guiaSP-SADT', ANS_NS) is not None
-
-
-def _is_recurso(root: ET.Element) -> bool:
-    tipo = root.findtext('.//ans:cabecalho/ans:identificacaoTransacao/ans:tipoTransacao', namespaces=ANS_NS)
-    if (tipo or '').strip().upper() == 'RECURSO_GLOSA':
-        return True
-    return root.find('.//ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa', ANS_NS) is not None
-
+def _findall(root: ET.Element, xp: str) -> List[ET.Element]:
+    return root.findall(xp, ANS_NS)
 
 def _get_numero_lote(root: ET.Element) -> str:
-    el = root.find('.//ans:prestadorParaOperadora/ans:loteGuias/ans:numeroLote', ANS_NS)
-    if el is not None and el.text and el.text.strip():
-        return el.text.strip()
-    el = root.find('.//ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa/ans:numeroLote', ANS_NS)
-    if el is not None and el.text and el.text.strip():
-        return el.text.strip()
-    raise TissParsingError('numeroLote não encontrado no XML.')
+    el = _find(root, './/ans:prestadorParaOperadora/ans:loteGuias/ans:numeroLote')
+    if el is not None and _tx(el):
+        return _tx(el)
+    el = _find(root, './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa/ans:numeroLote')
+    if el is not None and _tx(el):
+        return _tx(el)
+    return ""
 
+def _is_consulta(root: ET.Element) -> bool:
+    return _find(root, './/ans:guiaConsulta') is not None
 
-# ----------------------------
-# CONSULTA
-# ----------------------------
-def _sum_consulta(root: ET.Element) -> tuple[int, Decimal, str]:
-    total = Decimal('0')
-    guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaConsulta', ANS_NS)
-    for g in guias:
-        val_el = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
-        total += _dec(val_el.text if val_el is not None else None)
-    return len(guias), total, "consulta_valorProcedimento"
-
+def _is_sadt(root: ET.Element) -> bool:
+    return _find(root, './/ans:guiaSP-SADT') is not None
 
 # ----------------------------
-# SADT - soma por guia (robusta)
+# Extração item a item — CONSULTA
 # ----------------------------
-def _sum_itens_procedimentos(guia: ET.Element) -> Decimal:
-    total = Decimal('0')
-    for it in guia.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
-        vtot = it.find('ans:valorTotal', ANS_NS)
-        if vtot is not None and vtot.text and vtot.text.strip():
-            total += _dec(vtot.text)
-        else:
-            vuni = it.find('ans:valorUnitario', ANS_NS)
-            qtd = it.find('ans:quantidadeExecutada', ANS_NS)
-            if (vuni is not None and vuni.text) and (qtd is not None and qtd.text):
-                total += _dec(vuni.text) * _dec(qtd.text)
-    return total
+def _itens_consulta(guia: ET.Element) -> List[Dict]:
+    # Em consulta, em geral há 1 procedimento (procedimento → codigoTabela/ codigoProcedimento/ descricaoProcedimento / valorProcedimento)
+    proc = _find(guia, './/ans:procedimento')
+    codigo_tabela = _tx(_find(proc, 'ans:codigoTabela')) if proc is not None else ''
+    codigo_proc   = _tx(_find(proc, 'ans:codigoProcedimento')) if proc is not None else ''
+    descricao     = _tx(_find(proc, 'ans:descricaoProcedimento')) if proc is not None else ''
+    valor         = _dec(_tx(_find(proc, 'ans:valorProcedimento'))) if proc is not None else DEC_ZERO
 
-
-def _sum_itens_outras_desp(guia: ET.Element) -> Decimal:
-    total = Decimal('0')
-    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
-        sv = desp.find('ans:servicosExecutados', ANS_NS)
-        if sv is None:
-            continue
-        el_val = sv.find('ans:valorTotal', ANS_NS)
-        total += _dec(el_val.text if el_val is not None else None)
-    return total
-
-
-def _sum_componentes_valorTotal(guia: ET.Element) -> Decimal:
-    total = Decimal('0')
-    vt = guia.find('ans:valorTotal', ANS_NS)
-    if vt is None:
-        return Decimal('0')
-    for tag in ('valorProcedimentos', 'valorDiarias', 'valorTaxasAlugueis',
-                'valorMateriais', 'valorMedicamentos', 'valorGasesMedicinais'):
-        el = vt.find(f'ans:{tag}', ANS_NS)
-        total += _dec(el.text if el is not None else None)
-    return total
-
-
-def _sum_sadt_guia(guia: ET.Element) -> tuple[Decimal, str]:
-    vt = guia.find('ans:valorTotal', ANS_NS)
-    if vt is not None:
-        vtg = vt.find('ans:valorTotalGeral', ANS_NS)
-        vtg_val = _dec(vtg.text if vtg is not None else None)
-        if vtg_val > 0:
-            return vtg_val, 'valorTotalGeral'
-
-    proc_itens = _sum_itens_procedimentos(guia)
-    outras_itens = _sum_itens_outras_desp(guia)
-    itens_total = proc_itens + outras_itens
-    if itens_total > 0:
-        return itens_total, 'itens (proced+outras)'
-
-    comp_total = _sum_componentes_valorTotal(guia)
-    if comp_total > 0:
-        return comp_total, 'componentes_valorTotal'
-
-    return Decimal('0'), 'zero'
-
-
-def _sum_sadt(root: ET.Element) -> tuple[int, Decimal, str]:
-    total = Decimal('0')
-    guias = root.findall('.//ans:prestadorParaOperadora/ans:loteGuias/ans:guiasTISS/ans:guiaSP-SADT', ANS_NS)
-    estrategias: Dict[str, int] = {}
-
-    for g in guias:
-        v, strat = _sum_sadt_guia(g)
-        total += v
-        estrategias[strat] = estrategias.get(strat, 0) + 1
-
-    if not guias:
-        return 0, Decimal('0'), 'zero'
-
-    if len(estrategias) == 1:
-        estrategia_arquivo = next(iter(estrategias.keys()))
-    else:
-        estrategia_arquivo = "misto: " + ", ".join(
-            f"{k}={v}" for k, v in sorted(estrategias.items(), key=lambda x: (-x[1], x[0]))
-        )
-    return len(guias), total, estrategia_arquivo
-
+    return [{
+        'tipo_item': 'procedimento',
+        'identificadorDespesa': '',
+        'codigo_tabela': codigo_tabela,
+        'codigo_procedimento': codigo_proc,
+        'descricao_procedimento': descricao,
+        'quantidade': Decimal('1'),
+        'valor_unitario': valor,
+        'valor_total': valor
+    }]
 
 # ----------------------------
-# RECURSO DE GLOSA
+# Extração item a item — SADT
 # ----------------------------
-def _sum_recurso(root: ET.Element) -> tuple[int, Decimal, str, str]:
-    base = './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa'
-    qtde_guias = len(root.findall(f'{base}/ans:opcaoRecurso/ans:recursoGuia', ANS_NS))
-    valor_total = _dec(_get_text(root, f'{base}/ans:valorTotalRecursado'))
-    protocolo = _get_text(root, f'{base}/ans:numeroProtocolo') or ''
-    return qtde_guias, valor_total, 'recurso_valorTotalRecursado', protocolo
+def _itens_sadt(guia: ET.Element) -> List[Dict]:
+    out: List[Dict] = []
 
+    # procedimentosExecutados/procedimentoExecutado
+    for it in _findall(guia, './/ans:procedimentosExecutados/ans:procedimentoExecutado'):
+        proc = _find(it, 'ans:procedimento')
+        codigo_tabela = _tx(_find(proc, 'ans:codigoTabela')) if proc is not None else ''
+        codigo_proc   = _tx(_find(proc, 'ans:codigoProcedimento')) if proc is not None else ''
+        descricao     = _tx(_find(proc, 'ans:descricaoProcedimento')) if proc is not None else ''
+
+        qtd  = _dec(_tx(_find(it, 'ans:quantidadeExecutada')))
+        vuni = _dec(_tx(_find(it, 'ans:valorUnitario')))
+        vtot = _dec(_tx(_find(it, 'ans:valorTotal')))
+        if vtot == DEC_ZERO and (vuni > DEC_ZERO and qtd > DEC_ZERO):
+            vtot = vuni * qtd
+
+        out.append({
+            'tipo_item': 'procedimento',
+            'identificadorDespesa': '',
+            'codigo_tabela': codigo_tabela,
+            'codigo_procedimento': codigo_proc,
+            'descricao_procedimento': descricao,
+            'quantidade': qtd if qtd > DEC_ZERO else Decimal('1'),
+            'valor_unitario': vuni if vuni > DEC_ZERO else (vtot if (vtot>DEC_ZERO) else DEC_ZERO),
+            'valor_total': vtot if vtot > DEC_ZERO else (vuni*qtd if (vuni>DEC_ZERO and qtd>DEC_ZERO) else DEC_ZERO),
+        })
+
+    # outrasDespesas/despesa/servicosExecutados
+    for desp in _findall(guia, './/ans:outrasDespesas/ans:despesa'):
+        ident = _tx(_find(desp, 'ans:identificadorDespesa'))
+        sv = _find(desp, 'ans:servicosExecutados')
+        codigo_tabela = _tx(_find(sv, 'ans:codigoTabela')) if sv is not None else ''
+        codigo_proc   = _tx(_find(sv, 'ans:codigoProcedimento')) if sv is not None else ''
+        descricao     = _tx(_find(sv, 'ans:descricaoProcedimento')) if sv is not None else ''
+        qtd  = _dec(_tx(_find(sv, 'ans:quantidadeExecutada'))) if sv is not None else DEC_ZERO
+        vuni = _dec(_tx(_find(sv, 'ans:valorUnitario')))      if sv is not None else DEC_ZERO
+        vtot = _dec(_tx(_find(sv, 'ans:valorTotal')))         if sv is not None else DEC_ZERO
+        if vtot == DEC_ZERO and (vuni > DEC_ZERO and qtd > DEC_ZERO):
+            vtot = vuni * qtd
+
+        out.append({
+            'tipo_item': 'outra_despesa',
+            'identificadorDespesa': ident,
+            'codigo_tabela': codigo_tabela,
+            'codigo_procedimento': codigo_proc,
+            'descricao_procedimento': descricao,
+            'quantidade': qtd if qtd > DEC_ZERO else Decimal('1'),
+            'valor_unitario': vuni if vuni > DEC_ZERO else (vtot if (vtot>DEC_ZERO) else DEC_ZERO),
+            'valor_total': vtot if vtot > DEC_ZERO else (vuni*qtd if (vuni>DEC_ZERO and qtd>DEC_ZERO) else DEC_ZERO),
+        })
+
+    return out
 
 # ----------------------------
-# API pública
+# API pública — Itens por guia (XML)
 # ----------------------------
-def _parse_root(root: ET.Element, arquivo_nome: str) -> Dict:
-    numero_lote = _get_numero_lote(root)
-
-    if _is_recurso(root):
-        n_guias, total, estrategia, protocolo = _sum_recurso(root)
-        out = {
-            'arquivo': arquivo_nome,
-            'numero_lote': numero_lote,
-            'tipo': 'RECURSO',
-            'qtde_guias': n_guias,
-            'valor_total': total,
-            'valor_glosado': Decimal('0'),
-            'valor_liberado': Decimal('0'),
-            'estrategia_total': estrategia,
-            'parser_version': __version__,
-        }
-        if protocolo:
-            out['protocolo'] = protocolo
-        return out
-
-    if _is_consulta(root):
-        n_guias, total, estrategia = _sum_consulta(root)
-        return {
-            'arquivo': arquivo_nome,
-            'numero_lote': numero_lote,
-            'tipo': 'CONSULTA',
-            'qtde_guias': n_guias,
-            'valor_total': total,
-            'valor_glosado': Decimal('0'),
-            'valor_liberado': Decimal('0'),
-            'estrategia_total': estrategia,
-            'parser_version': __version__,
-        }
-
-    tipo = 'SADT' if _is_sadt(root) else 'DESCONHECIDO'
-    n_guias, total, estrategia = _sum_sadt(root) if tipo == 'SADT' else (0, Decimal('0'), 'zero')
-    return {
-        'arquivo': arquivo_nome,
-        'numero_lote': numero_lote,
-        'tipo': tipo,
-        'qtde_guias': n_guias,
-        'valor_total': total,
-        'valor_glosado': Decimal('0'),
-        'valor_liberado': Decimal('0'),
-        'estrategia_total': estrategia,
-        'parser_version': __version__,
-    }
-
-
-def parse_tiss_xml(source: Union[str, Path, IO[bytes]]) -> Dict:
+def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
+    """Extrai itens por guia (Consulta e SP-SADT). Recurso de Glosa não gera itens aqui."""
     if hasattr(source, 'read'):
         if hasattr(source, 'seek'):
             source.seek(0)
         root = ET.parse(source).getroot()
-        arquivo_nome = getattr(source, 'name', 'upload.xml')
-        return _parse_root(root, Path(arquivo_nome).name)
-
-    path = Path(source)
-    root = ET.parse(path).getroot()
-    return _parse_root(root, path.name)
-
-
-def parse_many_xmls(paths: List[Union[str, Path]]) -> List[Dict]:
-    resultados: List[Dict] = []
-    for p in paths:
-        try:
-            resultados.append(parse_tiss_xml(p))
-        except Exception as e:
-            resultados.append({
-                'arquivo': Path(p).name if hasattr(p, 'name') else str(p),
-                'numero_lote': '',
-                'tipo': 'DESCONHECIDO',
-                'qtde_guias': 0,
-                'valor_total': Decimal('0'),
-                'valor_glosado': Decimal('0'),
-                'valor_liberado': Decimal('0'),
-                'estrategia_total': 'erro',
-                'parser_version': __version__,
-                'erro': str(e),
-            })
-    return resultados
-
-
-# ----------------------------
-# Auditoria por guia (com paciente, médico e data)
-# ----------------------------
-def audit_por_guia(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
-    if hasattr(source, 'read'):
-        if hasattr(source, 'seek'):
-            source.seek(0)
-        root = ET.parse(source).getroot()
-        arquivo_nome = getattr(source, 'name', 'upload.xml')
+        arquivo_nome = Path(getattr(source, 'name', 'upload.xml')).name
     else:
         p = Path(source)
         root = ET.parse(p).getroot()
         arquivo_nome = p.name
 
+    numero_lote = _get_numero_lote(root)
     out: List[Dict] = []
-    numero_lote_for_audit = ""
-    try:
-        numero_lote_for_audit = _get_numero_lote(root)
-    except Exception:
-        numero_lote_for_audit = ""
-
-    def _get_paciente(g: ET.Element) -> str:
-        el = g.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS)
-        return (el.text or '').strip() if el is not None else ''
-
-    def _get_medico(g: ET.Element) -> str:
-        el = g.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS)
-        return (el.text or '').strip() if el is not None else ''
-
-    def _get_data(g: ET.Element) -> str:
-        el = g.find('.//ans:dataAtendimento', ANS_NS)
-        return (el.text or '').strip() if el is not None else ''
-
-    # RECURSO
-    if _is_recurso(root):
-        base = './/ans:prestadorParaOperadora/ans:recursoGlosa/ans:guiaRecursoGlosa'
-        protocolo = _get_text(root, f'{base}/ans:numeroProtocolo')
-        lote = _get_text(root, f'{base}/ans:numeroLote')
-        for rg in root.findall(f'{base}/ans:opcaoRecurso/ans:recursoGuia', ANS_NS):
-            out.append({
-                'arquivo': arquivo_nome,
-                'tipo': 'RECURSO',
-                'numero_lote': (lote or numero_lote_for_audit or ''),
-                'protocolo': protocolo,
-                'numeroGuiaOrigem': _get_text(rg, 'ans:numeroGuiaOrigem'),
-                'numeroGuiaOperadora': _get_text(rg, 'ans:numeroGuiaOperadora'),
-                'paciente': _get_paciente(rg),
-                'medico': _get_medico(rg),
-                'data_atendimento': _get_data(rg),
-                'parser_version': __version__,
-            })
-        return out
 
     # CONSULTA
-    if _is_consulta(root):
-        for g in root.findall('.//ans:guiaConsulta', ANS_NS):
-            vp = g.find('.//ans:procedimento/ans:valorProcedimento', ANS_NS)
-            v = _dec(vp.text if vp is not None else None)
-            out.append({
+    for guia in _findall(root, './/ans:guiaConsulta'):
+        numero_guia_prest = _tx(_find(guia, 'ans:numeroGuiaPrestador'))
+        paciente = _tx(_find(guia, './/ans:dadosBeneficiario/ans:nomeBeneficiario'))
+        medico   = _tx(_find(guia, './/ans:dadosProfissionaisResponsaveis/ans:nomeProfissional'))
+        data_atd = _tx(_find(guia, './/ans:dataAtendimento'))
+
+        for it in _itens_consulta(guia):
+            it.update({
                 'arquivo': arquivo_nome,
-                'tipo': 'CONSULTA',
-                'numeroGuiaPrestador': _get_text(g, 'ans:numeroGuiaPrestador'),
-                'paciente': _get_paciente(g),
-                'medico': _get_medico(g),
-                'data_atendimento': _get_data(g),
-                'total_tag': v,
-                'subtotal_itens_proc': v,
-                'subtotal_itens_outras': Decimal('0'),
-                'subtotal_itens': v,
-                'numero_lote': numero_lote_for_audit,
-                'parser_version': __version__,
+                'numero_lote': numero_lote,
+                'tipo_guia': 'CONSULTA',
+                'numeroGuiaPrestador': numero_guia_prest,
+                'numeroGuiaOperadora': '',  # não presente na guia de consulta
+                'paciente': paciente,
+                'medico': medico,
+                'data_atendimento': data_atd,
             })
-        return out
+            out.append(it)
 
     # SADT
-    for g in root.findall('.//ans:guiaSP-SADT', ANS_NS):
-        cab = g.find('.//ans:cabecalhoGuia', ANS_NS)
-        num_prest = (cab.find('ans:numeroGuiaPrestador', ANS_NS).text.strip()
-                     if cab is not None and cab.find('ans:numeroGuiaPrestador', ANS_NS) is not None else '')
-        vt = g.find('ans:valorTotal', ANS_NS)
-        vtg = _dec(vt.find('ans:valorTotalGeral', ANS_NS).text) if (vt is not None and vt.find('ans:valorTotalGeral', ANS_NS) is not None) else Decimal('0')
-        proc = _sum_itens_procedimentos(g)
-        outras = _sum_itens_outras_desp(g)
-        out.append({
-            'arquivo': arquivo_nome,
-            'tipo': 'SADT',
-            'numeroGuiaPrestador': num_prest,
-            'paciente': _get_paciente(g),
-            'medico': _get_medico(g),
-            'data_atendimento': _get_data(g),
-            'total_tag': vtg,
-            'subtotal_itens_proc': proc,
-            'subtotal_itens_outras': outras,
-            'subtotal_itens': proc + outras,
-            'numero_lote': numero_lote_for_audit,
-            'parser_version': __version__,
-        })
+    for guia in _findall(root, './/ans:guiaSP-SADT'):
+        cab = _find(guia, 'ans:cabecalhoGuia')
+        numero_guia_prest = _tx(_find(cab, 'ans:numeroGuiaPrestador')) if cab is not None else ''
+        numero_guia_oper  = _tx(_find(cab, 'ans:numeroGuiaOperadora')) if cab is not None else ''
+        paciente = _tx(_find(guia, './/ans:dadosBeneficiario/ans:nomeBeneficiario'))
+        medico   = _tx(_find(guia, './/ans:dadosProfissionaisResponsaveis/ans:nomeProfissional'))
+        data_atd = _tx(_find(guia, './/ans:dataAtendimento'))
+
+        for it in _itens_sadt(guia):
+            it.update({
+                'arquivo': arquivo_nome,
+                'numero_lote': numero_lote,
+                'tipo_guia': 'SADT',
+                'numeroGuiaPrestador': numero_guia_prest,
+                'numeroGuiaOperadora': numero_guia_oper,
+                'paciente': paciente,
+                'medico': medico,
+                'data_atendimento': data_atd,
+            })
+            out.append(it)
+
+    return out
+
+def parse_itens_many(paths: List[Union[str, Path]]) -> pd.DataFrame:
+    linhas: List[Dict] = []
+    for p in paths:
+        try:
+            linhas.extend(parse_itens_tiss_xml(p))
+        except Exception as e:
+            linhas.append({'arquivo': Path(p).name if hasattr(p, 'name') else str(p),
+                           'erro': str(e)})
+    df = pd.DataFrame(linhas)
+    # Normalizações
+    if not df.empty:
+        for c in ['quantidade', 'valor_unitario', 'valor_total']:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
+        # Chaves de casamento
+        df['chave_prest'] = (df.get('numeroGuiaPrestador', '').astype(str).str.strip()
+                             + '__' + df.get('codigo_procedimento', '').astype(str).str.strip())
+        df['chave_oper']  = (df.get('numeroGuiaOperadora', '').astype(str).str.strip()
+                             + '__' + df.get('codigo_procedimento', '').astype(str).str.strip())
+    return df
+
+# ----------------------------
+# Leitura Demonstrativo (.xlsx) — Itens
+# ----------------------------
+_COLMAPS = {
+    'lote':       [r'^lote$'],
+    'competencia':[r'^compet', r'^m[êe]s', r'^mes/?ano'],
+    'guia_prest':[r'prestador', r'guia\s*prest'],
+    'guia_oper': [r'operadora', r'guia\s*oper'],
+    'cod_proc':  [r'c[oó]d.*proced', r'proced.*c[oó]d'],
+    'desc_proc': [r'descri', r'proced.*descri'],
+    'qtd_apres': [r'qtde|quant', r'apresent'],
+    'qtd_paga':  [r'qtde|quant', r'(paga|autori)'],
+    'val_apres': [r'valor', r'apresent'],
+    'val_glosa': [r'glosa'],
+    'val_pago':  [r'(valor.*(pago|apurado))|(pago$)|(apurado$)'],
+    'motivo_cod':[r'(motivo.*c[oó]d)|(c[oó]d.*motivo)'],
+    'motivo_desc':[r'(descri.*motivo)|(motivo.*descri)'],
+}
+
+def _match_col(cols: List[str], pats: List[str]) -> Optional[str]:
+    for c in cols:
+        s = str(c).strip()
+        s_norm = re.sub(r'\s+', ' ', s.lower())
+        ok = True
+        for p in pats:
+            if not re.search(p, s_norm):
+                ok = False; break
+        if ok:
+            return s
+    return None
+
+def _find_header_row(df_raw: pd.DataFrame) -> int:
+    # usa a mesma heurística anterior: procurar linha com "CPF/CNPJ" na 1ª coluna, senão assume a primeira linha é cabeçalho
+    s0 = df_raw.iloc[:,0].astype(str).str.strip().str.lower()
+    mask = s0.eq('cpf/cnpj')
+    if mask.any():
+        return int(mask.idxmax()) + 1  # header é a linha seguinte
+    return 0
+
+def ler_demo_itens_pagto_xlsx(source) -> pd.DataFrame:
+    """Lê planilha itemizada do Demonstrativo; tenta detectar colunas por regex."""
+    xls = pd.ExcelFile(source, engine='openpyxl')
+    # tenta achar a(s) sheet(s) com “Analise” / “Item”
+    sheet = None
+    for s in xls.sheet_names:
+        s_norm = s.strip().lower()
+        if 'item' in s_norm or 'analise' in s_norm or 'análise' in s_norm:
+            sheet = s; break
+    if sheet is None:
+        sheet = xls.sheet_names[0]
+
+    df_raw = pd.read_excel(source, sheet_name=sheet, engine='openpyxl')
+    hdr = _find_header_row(df_raw)
+    df = df_raw.copy()
+    if hdr > 0:
+        df.columns = df_raw.iloc[hdr]
+        df = df_raw.iloc[hdr+1:].reset_index(drop=True)
+
+    cols = [str(c) for c in df.columns]
+    pick = {k: _match_col(cols, v) for k, v in _COLMAPS.items()}
+
+    need_any = ['val_apres', 'val_glosa', 'val_pago', 'cod_proc']
+    if not any(pick.get(c) for c in need_any):
+        raise ValueError("Não identifiquei colunas itemizadas no Demonstrativo. Envie um exemplo para mapearmos.")
+
+    def col(c): return pick.get(c)
+
+    out = pd.DataFrame({
+        'numero_lote'        : df[col('lote')] if col('lote') else None,
+        'competencia'        : df[col('competencia')] if col('competencia') else None,
+        'numeroGuiaPrestador': (df[col('guia_prest')] if col('guia_prest') else None),
+        'numeroGuiaOperadora': (df[col('guia_oper')]  if col('guia_oper')  else None),
+        'codigo_procedimento': df[col('cod_proc')] if col('cod_proc') else None,
+        'descricao_procedimento': df[col('desc_proc')] if col('desc_proc') else None,
+        'quantidade_apresentada': pd.to_numeric(df[col('qtd_apres')], errors='coerce') if col('qtd_apres') else 0.0,
+        'quantidade_paga'       : pd.to_numeric(df[col('qtd_paga')], errors='coerce')  if col('qtd_paga')  else 0.0,
+        'valor_apresentado'     : pd.to_numeric(df[col('val_apres')], errors='coerce') if col('val_apres') else 0.0,
+        'valor_glosa'           : pd.to_numeric(df[col('val_glosa')], errors='coerce') if col('val_glosa') else 0.0,
+        'valor_pago'            : pd.to_numeric(df[col('val_pago')], errors='coerce')  if col('val_pago')  else 0.0,
+        'motivo_glosa_codigo'   : df[col('motivo_cod')] if col('motivo_cod') else None,
+        'motivo_glosa_descricao': df[col('motivo_desc')] if col('motivo_desc') else None,
+    })
+
+    # normalizações
+    for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
+        if c in out.columns:
+            out[c] = out[c].astype(str).str.strip()
+    for c in ['valor_apresentado', 'valor_glosa', 'valor_pago', 'quantidade_apresentada', 'quantidade_paga']:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
+
+    # chaves
+    out['chave_prest'] = (out.get('numeroGuiaPrestador', '').astype(str).str.strip()
+                          + '__' + out.get('codigo_procedimento', '').astype(str).str.strip())
+    out['chave_oper']  = (out.get('numeroGuiaOperadora', '').astype(str).str.strip()
+                          + '__' + out.get('codigo_procedimento', '').astype(str).str.strip())
     return out
