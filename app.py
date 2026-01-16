@@ -906,7 +906,8 @@ if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
                        glosa=('valor_glosa','sum'),
                        glosa_sim=('valor_glosa_sim','sum'),
                        pago=('valor_pago','sum'),
-                       pago_sim=('valor_pago_sim','sum')))
+                       pago_sim=('valor_pago_sim','sum')
+        ))
         st.json({k: f_currency(v) for k, v in res.to_dict().items()})
     else:
         st.info("Sem motivos de glosa identificados para simulação.")
