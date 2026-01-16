@@ -847,7 +847,9 @@ if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
     # 3.4 Médicos (filtro por competência)
     st.markdown("### 👩‍⚕️ Médicos — ranking por glosa")
     if 'competencia' in conc.columns:
-        comp_med = st.selectbox("Competência (médicos)", ['(todas)'] + sorted(conc['competencia'].dropna().astype(str).unique().tolist()))
+        comp_med = st.selectbox("Competência (médicos)", 
+        ['(todas)'] + sorted(conc['competencia'].dropna().astype(str).unique().tolist())
+        )
         med_base = conc if comp_med == '(todas)' else conc[conc['competencia'] == comp_med]
     else:
         med_base = conc
@@ -904,7 +906,7 @@ if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
                        glosa=('valor_glosa','sum'),
                        glosa_sim=('valor_glosa_sim','sum'),
                        pago=('valor_pago','sum'),
-                       pago_sim=('valor_pago_sim','sum'))))
+                       pago_sim=('valor_pago_sim','sum')))
         st.json({k: f_currency(v) for k, v in res.to_dict().items()})
     else:
         st.info("Sem motivos de glosa identificados para simulação.")
