@@ -902,11 +902,12 @@ if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
                 ajustes[cod] = fator
         sim = simulador_glosa(conc, ajustes)
         st.write("**Resumo do cenário simulado:**")
-        res = (sim.agg(total_apres=('valor_apresentado','sum'),
-                       glosa=('valor_glosa','sum'),
-                       glosa_sim=('valor_glosa_sim','sum'),
-                       pago=('valor_pago','sum'),
-                       pago_sim=('valor_pago_sim','sum')
+        res = (sim.agg(
+            total_apres=('valor_apresentado','sum'),
+            glosa=('valor_glosa','sum'),
+            glosa_sim=('valor_glosa_sim','sum'),
+            pago=('valor_pago','sum'),
+            pago_sim=('valor_pago_sim','sum')
         ))
         st.json({k: f_currency(v) for k, v in res.to_dict().items()})
     else:
