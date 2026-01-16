@@ -641,6 +641,34 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
 # ---------------------------------------------------------
 # Conciliação
 # ---------------------------------------------------------
+
+# --- helper para padronizar nomes "lado XML" após merges com sufixos ---
+_XML_CORE_COLS = [
+    'arquivo', 'numero_lote', 'tipo_guia',
+    'numeroGuiaPrestador', 'numeroGuiaOperadora',
+    'paciente', 'medico', 'data_atendimento',
+    'tipo_item', 'identificadorDespesa',
+    'codigo_tabela', 'codigo_procedimento', 'codigo_procedimento_norm',
+    'descricao_procedimento',
+    'quantidade', 'valor_unitario', 'valor_total',
+    'chave_oper', 'chave_prest',
+]
+
+def _alias_xml_cols(df: pd.DataFrame, cols: list[str] = None, prefer_suffix: str = '_xml') -> pd.DataFrame:
+    """
+    Garante que as colunas de interesse (lado XML) existam SEM sufixo,
+    copiando de 'colname_xml' caso necessário.
+    """
+    if cols is None:
+        cols = _XML_CORE_COLS
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            cand = f'{c}{prefer_suffix}'
+            if cand in out.columns:
+                out[c] = out[cand]
+    return out
+
 def conciliar_itens(
     df_xml: pd.DataFrame,
     df_demo: pd.DataFrame,
@@ -656,127 +684,143 @@ def conciliar_itens(
     5) Calcula diffs e % de glosa
     """
 
-    # ======================================================
+    # ------------------------------------------------------
     # 1) Match por chave_prest
-    # ======================================================
+    # ------------------------------------------------------
     m1 = df_xml.merge(
         df_demo,
         on="chave_prest",
         how="left",
-        suffixes=("_xml", "_demo")
+        suffixes=("_xml", "_demo"),
     )
+    # padroniza visão XML: cria aliases sem sufixo a partir de *_xml
+    m1 = _alias_xml_cols(m1)
+
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # ======================================================
-    # 2) Match por chave_oper (somente os que não casaram)
-    # ======================================================
+    # ------------------------------------------------------
+    # 2) Match por chave_oper (nos que não casaram)
+    # ------------------------------------------------------
     restante = m1[m1["matched_on"] == ""].copy()
+    # garante que todas as colunas lado XML existam sem sufixo
+    restante = _alias_xml_cols(restante)
 
-    still_xml = restante[
-        [
-            'arquivo', 'numero_lote', 'tipo_guia',
-            'numeroGuiaPrestador', 'numeroGuiaOperadora',
-            'paciente', 'medico', 'data_atendimento',
-            'tipo_item', 'identificadorDespesa',
-            'codigo_tabela', 'codigo_procedimento',
-            'codigo_procedimento_norm',
-            'descricao_procedimento',
-            'quantidade', 'valor_unitario', 'valor_total',
-            'chave_oper', 'chave_prest'
-        ]
+    cols_for_second_join = [
+        'arquivo', 'numero_lote', 'tipo_guia',
+        'numeroGuiaPrestador', 'numeroGuiaOperadora',
+        'paciente', 'medico', 'data_atendimento',
+        'tipo_item', 'identificadorDespesa',
+        'codigo_tabela', 'codigo_procedimento', 'codigo_procedimento_norm',
+        'descricao_procedimento',
+        'quantidade', 'valor_unitario', 'valor_total',
+        'chave_oper', 'chave_prest',
     ]
+
+    # filtra apenas as colunas que de fato existem
+    cols_for_second_join = [c for c in cols_for_second_join if c in restante.columns]
+    still_xml = restante[cols_for_second_join].copy()
 
     m2 = still_xml.merge(
         df_demo,
         on="chave_oper",
         how="left",
-        suffixes=("_xml", "_demo")
+        suffixes=("_xml", "_demo"),
     )
+    # novamente padroniza visão XML em m2
+    m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    # conciliação parcial acumulada
+    # acumula conciliados
     conc = pd.concat(
         [
             m1[m1["matched_on"] != ""],
-            m2[m2["matched_on"] != ""]
+            m2[m2["matched_on"] != ""],
         ],
         ignore_index=True
     )
 
-    # ======================================================
-    # 3) Fallback opcional — CASAR POR DESCRIÇÃO + tolerância R$
-    # ======================================================
+    # ------------------------------------------------------
+    # 3) Fallback opcional — descrição + tolerância de valor
+    # ------------------------------------------------------
     fallback_matches = pd.DataFrame()
 
     if fallback_por_descricao:
-        # pega tudo não casado ainda
-        rem1 = m1[m1["matched_on"] == ""]
-        rem2 = m2[m2["matched_on"] == ""]
+        rem1 = m1[m1["matched_on"] == ""].copy()
+        rem2 = m2[m2["matched_on"] == ""].copy()
+
+        # padroniza visão XML para ambas bases remanescentes
+        rem1 = _alias_xml_cols(rem1)
+        rem2 = _alias_xml_cols(rem2)
+
         rem_xml = pd.concat([rem1, rem2], ignore_index=True)
 
         if not rem_xml.empty:
-            # chave de guia unificada
+            # chave de guia unificada: prestador se existir, senão operadora
             rem_xml["guia_join"] = rem_xml.apply(
-                lambda r: r["numeroGuiaPrestador"]
-                if str(r.get("numeroGuiaPrestador", "")).strip()
+                lambda r: r["numeroGuiaPrestador"] if str(r.get("numeroGuiaPrestador", "")).strip()
                 else str(r.get("numeroGuiaOperadora", "")).strip(),
                 axis=1
             )
 
             df_demo2 = df_demo.copy()
             df_demo2["guia_join"] = df_demo2.apply(
-                lambda r: r["numeroGuiaPrestador"]
-                if str(r.get("numeroGuiaPrestador", "")).strip()
+                lambda r: r["numeroGuiaPrestador"] if str(r.get("numeroGuiaPrestador", "")).strip()
                 else str(r.get("numeroGuiaOperadora", "")).strip(),
                 axis=1
             )
 
-            tmp = rem_xml.merge(
-                df_demo2,
-                on=["guia_join", "descricao_procedimento"],
-                how="left",
-                suffixes=("_xml", "_demo")
-            )
+            # precisa garantir que 'descricao_procedimento' exista nos dois lados
+            if "descricao_procedimento" in rem_xml.columns and "descricao_procedimento" in df_demo2.columns:
+                tmp = rem_xml.merge(
+                    df_demo2,
+                    on=["guia_join", "descricao_procedimento"],
+                    how="left",
+                    suffixes=("_xml", "_demo")
+                )
 
-            # valores parecidos
-            tol = float(tolerance_valor)
-            keep = (
-                tmp["valor_apresentado"].notna()
-                & ((tmp["valor_total"] - tmp["valor_apresentado"]).abs() <= tol)
-            )
+                tol = float(tolerance_valor)
+                keep = (
+                    tmp["valor_apresentado"].notna()
+                    & ((tmp["valor_total"] - tmp["valor_apresentado"]).abs() <= tol)
+                )
 
-            fallback_matches = tmp[keep].copy()
-            if not fallback_matches.empty:
-                fallback_matches["matched_on"] = "descricao+valor"
-                conc = pd.concat([conc, fallback_matches], ignore_index=True)
+                fallback_matches = tmp[keep].copy()
+                if not fallback_matches.empty:
+                    fallback_matches["matched_on"] = "descricao+valor"
+                    conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
-    # ======================================================
-    # 4) Monta NÃO-CASADOS finais
-    # ======================================================
+    # ------------------------------------------------------
+    # 4) Não casados finais (com nomes sem sufixo)
+    # ------------------------------------------------------
     unmatch = pd.concat(
         [
             m1[m1["matched_on"] == ""],
             m2[m2["matched_on"] == ""],
-            fallback_matches[
-                fallback_matches.get("matched_on", "") == ""
-            ] if not fallback_matches.empty else pd.DataFrame()
+            fallback_matches[fallback_matches.get("matched_on", "") == ""]
+            if not fallback_matches.empty else pd.DataFrame()
         ],
         ignore_index=True
     )
+    # padroniza visão XML antes de deduplicar/usar colunas
+    unmatch = _alias_xml_cols(unmatch)
 
     if not unmatch.empty:
-        unmatch = unmatch.drop_duplicates(
-            subset=[
-                "arquivo", "numero_lote", "tipo_guia",
-                "numeroGuiaPrestador", "codigo_procedimento",
-                "valor_total"
-            ]
-        )
+        subset_cols = [
+            "arquivo", "numero_lote", "tipo_guia",
+            "numeroGuiaPrestador", "codigo_procedimento",
+            "valor_total"
+        ]
+        subset_cols = [c for c in subset_cols if c in unmatch.columns]
+        if subset_cols:
+            unmatch = unmatch.drop_duplicates(subset=subset_cols)
 
-    # ======================================================
-    # 5) Calcula diffs e indicadores
-    # ======================================================
+    # ------------------------------------------------------
+    # 5) Diffs e % glosa
+    # ------------------------------------------------------
     if not conc.empty:
+        # garante visão XML antes dos cálculos
+        conc = _alias_xml_cols(conc)
+
         conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
         conc["glosa_pct"] = conc.apply(
             lambda r: (
@@ -791,7 +835,6 @@ def conciliar_itens(
         "conciliacao": conc,
         "nao_casados": unmatch
     }
-
 
 # =========================================================
 # PARTE 4 — Auditoria de Guias
