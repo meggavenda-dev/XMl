@@ -229,10 +229,14 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
+    # NOVA LÓGICA CORRIGIDA:
+    # Primeiro, tenta buscar na raiz da guia (onde está no seu LOTE 91650)
+    numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+
+    # Se não encontrou na raiz, tenta buscar dentro do cabeçalho (padrão de outros sistemas)
+    if not numero_guia_prest:
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        # NOVA LÓGICA: primeiro busca na raiz da guia
-        numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
-        if not numero_guia_prest and cab is not None:
+        if cab is not None:
             numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
         numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
@@ -317,13 +321,7 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
         s = str(val).strip().split('.')[0] # Remove .0
         return s.lstrip('0') # Remove zeros à esquerda para alinhar com XML
 
-    df["numeroGuiaPrestador"] = (
-        df["numeroGuiaPrestador"]
-        .astype(str)
-        .str.strip()
-        .str.replace(".0", "", regex=False)
-        .str.lstrip("0")
-    )
+    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].astype(str).str.replace(".0", "", regex=False).str.lstrip("0")
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
     
     # Normalização de códigos (procedimentos e materiais)
