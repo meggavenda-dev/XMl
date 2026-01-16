@@ -228,24 +228,23 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             })
             out.append(it)
 
-    # SADT
+    # --- PARTE 2: XML TISS (SADT) ---
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
         
-        # --- BLOCO CORRIGIDO E IDENTADO ---
-        # Primeiro, tenta buscar na raiz da guia (onde está no seu LOTE 91650)
+        # Tenta buscar a guia primeiro na raiz (como está no seu arquivo)
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
-
-        # Se não encontrou na raiz, tenta buscar dentro do cabeçalho
+        
+        # Se não encontrou, tenta dentro do cabeçalho
         if not numero_guia_prest:
             if cab is not None:
                 numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
-        # ----------------------------------
-
-        numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
+        
+        numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
+        
         for it in _itens_sadt(guia):
             it.update({
                 'arquivo': nome,
@@ -325,7 +324,14 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
         s = str(val).strip().split('.')[0] # Remove .0
         return s.lstrip('0') # Remove zeros à esquerda para alinhar com XML
 
-    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].astype(str).str.replace(".0", "", regex=False).str.lstrip("0")
+    # Limpeza da Guia para evitar que o Pandas leia como 8524664.0
+    df["numeroGuiaPrestador"] = (
+        df["numeroGuiaPrestador"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.strip()
+        .str.lstrip("0")
+    )
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
     
     # Normalização de códigos (procedimentos e materiais)
