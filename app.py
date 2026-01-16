@@ -228,19 +228,30 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             })
             out.append(it)
 
-    # --- PARTE 2: XML TISS (SADT) ---
+    # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
+        aut = guia.find('ans:dadosAutorizacao', ANS_NS) # NOVO: Local da guia operadora
         
-        # Tenta buscar a guia primeiro na raiz (como está no seu arquivo)
+        # --- SITUAÇÃO 1: Busca a Guia do Prestador (Ex: 8524664) ---
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        if not numero_guia_prest and cab is not None:
+            numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
+
+        # --- SITUAÇÃO 2: Busca a Guia da Operadora (Ex: 8530641) ---
+        numero_guia_oper = ""
+        if aut is not None:
+            numero_guia_oper = tx(aut.find('ans:numeroGuiaOperadora', ANS_NS))
         
-        # Se não encontrou, tenta dentro do cabeçalho
-        if not numero_guia_prest:
-            if cab is not None:
-                numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
-        
-        numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
+        # Fallback: Se não achou em autorização, tenta no cabeçalho
+        if not numero_guia_oper and cab is not None:
+            numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS))
+
+        # Garante que o campo operadora não fique vazio
+        if not numero_guia_oper:
+            numero_guia_oper = numero_guia_prest
+
+        # --- Coleta de dados gerais da guia ---
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
@@ -251,7 +262,7 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
                 'numero_lote': numero_lote,
                 'tipo_guia': 'SADT',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': numero_guia_oper,
+                'numeroGuiaOperadora': numero_guia_oper, # Importante: envia o 8530641 para a conciliação
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
