@@ -362,8 +362,7 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
 
     # 7) Criação das Chaves de Conciliação
-    df["guia_generica"] = df["numeroGuiaPrestador"].astype(str)
-    df["chave_demo"] = df["guia_generica"] + "__" + df["codigo_procedimento_norm"].astype(str)
+    df["chave_demo"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
 
     # 8) Tratamento da Glosa (separar código de texto)
     if "codigo_glosa_bruto" in df.columns:
@@ -587,34 +586,28 @@ def _alias_xml_cols(df: pd.DataFrame, cols: List[str] = None, prefer_suffix: str
                 out[c] = out[cand]
     return out
 
-def conciliar_itens(
-    df_xml: pd.DataFrame,
-    df_demo: pd.DataFrame,
-    tolerance_valor: float = 0.02,
-    fallback_por_descricao: bool = False,
-) -> Dict[str, pd.DataFrame]:
-
+def conciliar_itens(df_xml, df_demo, tolerance_valor=0.02, fallback_por_descricao=False):
     # 1ª tentativa — XML (Chave Prestador) == Demonstrativo
     m1 = df_xml.merge(df_demo, left_on="chave_prest", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # Separar o que ainda não casou
+    # Registros ainda sem match
     restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
     
-    # Colunas para o segundo merge (limpar colunas vindas do merge fracassado do demo)
-    cols_to_keep = [c for c in df_xml.columns]
+    # Colunas originais do XML para resetar o merge anterior que falhou
+    cols_xml = df_xml.columns.tolist()
 
     # 2ª tentativa — XML (Chave Operadora) == Demonstrativo
-    # Aqui resolve o seu caso: XML (8530641) == Demonstrativo (8530641)
-    m2 = restante[cols_to_keep].merge(df_demo, left_on="chave_oper", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
+    # ISSO RESOLVE O SEU CASO: XML (8530641) == Demonstrativo (8530641)
+    m2 = restante[cols_xml].merge(df_demo, left_on="chave_oper", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    # Unir os sucessos
+    # Unir os resultados de sucesso
     conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
-
+    
     # Fallback opcional por descrição + valor (ainda partindo do XML)
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
