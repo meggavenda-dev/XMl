@@ -622,7 +622,8 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     grp = (base.groupby('competencia', dropna=False, as_index=False)
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_pago=('valor_pago','sum'),
-                valor_glosa=('valor_glosa','sum'))))
+                valor_glosa=('valor_glosa','sum'))
+          )
     grp['glosa_pct'] = grp.apply(
         lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
     )
