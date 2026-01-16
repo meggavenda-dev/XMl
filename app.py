@@ -271,67 +271,75 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
     df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
     return df
 
-def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    df_raw = _cached_read_excel(path, 0)
-    header_row = None
-    for i in range(min(30, len(df_raw))):
-        row_txt = df_raw.iloc[i].astype(str).str.lower().tolist()
-        if any("cpf/cnpj" == c for c in row_txt):
-            header_row = i
+
+def ler_demo_amhp_fixado(path, strip_zeros_codes=False) -> pd.DataFrame:
+    # Lê tudo sem header
+    df_raw = pd.read_excel(path, header=None, engine="openpyxl")
+
+    # 1) Encontrar automaticamente a linha que contém CNPJ + Prestador + Lote + Competência + Guia
+    header_idx = None
+    for i in range(0, 10):  # procura só nas primeiras linhas
+        row = df_raw.iloc[i].astype(str)
+        # heurística: primeira coluna deve ser um CNPJ numérico com pelo menos 10 dígitos
+        if row[0].str.replace(".", "").str.replace("/", "").str.replace("-", "").str.isnumeric().any():
+            # esta é a primeira linha de dados: promover a linha anterior como header
+            header_idx = i - 1
             break
-    if header_row is None:
-        raise ValueError("Cabeçalho AMHP não encontrado (coluna CPF/CNPJ).")
 
-    df = df_raw.iloc[header_row + 1:].copy()
-    df.columns = df_raw.iloc[header_row]
-    df.columns = [c if not str(c).lower().startswith("unnamed") else "" for c in df.columns]
-    df = df.loc[:, df.columns != ""]
+    if header_idx is None or header_idx < 0:
+        header_idx = 2  # fallback: usualmente linha 2 contém header real
 
-    # Renomeia para padrão interno
+    # 2) Define o header
+    df = pd.read_excel(path, header=header_idx, engine="openpyxl")
+
+    # 3) Normaliza nomes das colunas automaticamente
     ren = {
+        "CNPJ": "cnpj",
+        "Prestador": "prestador",
+        "Lote": "numero_lote",
+        "Competência": "competencia",
         "Guia": "numeroGuiaPrestador",
+        "Data Realização": "data_atendimento",
+        "Tabela": "tabela",
         "Cod. Procedimento": "codigo_procedimento",
         "Descrição": "descricao_procedimento",
+        "Grau part.": "grau",
         "Valor Apresentado": "valor_apresentado",
+        "Quant. Exec.": "quantidade_apresentada",
         "Valor Apurado": "valor_pago",
         "Valor Glosa": "valor_glosa",
-        "Quant. Exec.": "quantidade_apresentada",
-        "Código Glosa": "Código Glosa",
+        "Código Glosa": "codigo_glosa",
     }
+
     df = df.rename(columns=ren)
 
-    for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    # 4) Remover linhas vazias eventualmente reconhecidas como header extra
+    df = df[df["numeroGuiaPrestador"].notna()]
 
+    # 5) Normalizações finais
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
 
-    # Item 3 aplicado: remover zeros à esquerda no número da guia
-    df['numeroGuiaPrestador'] = (
-        df['numeroGuiaPrestador']
+    df["numeroGuiaPrestador"] = (
+        df["numeroGuiaPrestador"]
         .astype(str)
         .str.strip()
-        .str.lstrip('0')
+        .str.replace(".0", "", regex=False)
+        .str.lstrip("0")
     )
 
-    df['numeroGuiaOperadora'] = (
-        df['numeroGuiaOperadora']
-        .astype(str)
-        .str.strip()
-        .str.lstrip('0')
-    )
-
-    df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
+    # 6) Criar chaves
     df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
-    df["chave_oper"] = df["numeroGuiaOperadora"] + "__" + df["codigo_procedimento_norm"]
+    df["chave_oper"] = df["chave_prest"]
 
-    if "Competência" in df.columns and "competencia" not in df.columns:
-        df["competencia"] = df["Competência"].astype(str)
+    # 7) Motivos de glosa
+    if "codigo_glosa" in df.columns:
+        gl = df["codigo_glosa"].astype(str)
+        df["motivo_glosa_codigo"] = gl.str.extract(r"^(\d+)")
+        df["motivo_glosa_descricao"] = gl.str.extract(r"\d+\s*-\s*(.*)")
 
-    df = tratar_codigo_glosa(df)
     return df.reset_index(drop=True)
 
 # Auto-detecção genérica (fallback)
