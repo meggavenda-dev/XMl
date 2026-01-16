@@ -238,355 +238,346 @@ def parse_itens_tiss_xml(source) -> List[Dict]:
     return out
 
 
+
 # =========================================================
-# PARTE 2 — Demonstrativo (.xlsx) + Wizard + Tratamento Glosa
+# PARTE 2 — Demonstrativo (.xlsx) + Wizard + Tratamento Glosa +
+#           Leitor AMHP Automático + Mapeamento Persistente
 # =========================================================
 
-# ---------- Normalização de texto p/ matching de colunas ----------
+import json
+import os
+
+
+# =========================================================
+# Persistência de mapeamento
+# =========================================================
+
+MAP_FILE = "demo_mappings.json"
+
+def load_demo_mappings():
+    """Carrega mapeamentos salvos do arquivo JSON."""
+    if os.path.exists(MAP_FILE):
+        try:
+            with open(MAP_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_demo_mappings(mappings: dict):
+    """Salva mapeamentos no arquivo JSON."""
+    try:
+        with open(MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(mappings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        st.error(f"Erro ao salvar mapeamentos: {e}")
+
+
+# =========================================================
+# Normalização e utilitários
+# =========================================================
+
 def _normtxt(s: str) -> str:
     s = str(s or "")
-    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
     s = s.lower().strip()
     return re.sub(r"\s+", " ", s)
 
-# ---------- Padrões de reconhecimento de colunas (auto-detecção) ----------
-# Observação: estes padrões cobrem seu layout (Lote, Competência, Guia, Cod. Procedimento etc.)
+
+# =========================================================
+# Tratamento automático Código Glosa
+# =========================================================
+
+def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
+    if "Código Glosa" not in df.columns:
+        return df
+
+    gl = df["Código Glosa"].astype(str).fillna("")
+
+    df["motivo_glosa_codigo"] = gl.str.extract(r"^(\d+)")
+    df["motivo_glosa_descricao"] = gl.str.extract(r"^\s*\d+\s*-\s*(.*)$")
+
+    df["motivo_glosa_codigo"] = df["motivo_glosa_codigo"].fillna("").str.strip()
+    df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
+
+    return df
+
+
+# =========================================================
+# LEITOR FIXO AMHP — sem wizard, sem auto-map
+# =========================================================
+
+def ler_demo_amhp_fixado(path, strip_zeros_codes=False):
+    """
+    Leitor automático exclusivo para o DemonstrativoAnaliseDeContas da AMHP.
+    Não exige wizard, nem auto-detecção, pois o layout é fixo.
+    """
+
+    df_raw = pd.read_excel(path, sheet_name=0, engine="openpyxl")
+
+    # 1) identifica a linha do cabeçalho
+    header_row = None
+    for i in range(min(30, len(df_raw))):
+        row_txt = df_raw.iloc[i].astype(str).str.lower().tolist()
+        if any("cpf/cnpj" == c for c in row_txt):
+            header_row = i
+            break
+
+    if header_row is None:
+        raise ValueError("Cabeçalho AMHP não encontrado (coluna CPF/CNPJ).")
+
+    # 2) aplica cabeçalho correto
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = df_raw.iloc[header_row]
+
+    # remove colunas Unnamed
+    df.columns = [c if not str(c).lower().startswith("unnamed") else "" for c in df.columns]
+    df = df.loc[:, df.columns != ""]
+
+    # 3) renomeia colunas AMHP → padrão interno
+    ren = {
+        "Guia": "numeroGuiaPrestador",
+        "Cod. Procedimento": "codigo_procedimento",
+        "Descrição": "descricao_procedimento",
+        "Valor Apresentado": "valor_apresentado",
+        "Valor Apurado": "valor_pago",
+        "Valor Glosa": "valor_glosa",
+        "Quant. Exec.": "quantidade_apresentada",
+        "Código Glosa": "Código Glosa",
+    }
+    df = df.rename(columns=ren)
+
+    # 4) tipos numéricos
+    for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    # 5) normaliza códigos
+    df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
+    df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
+        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
+    )
+
+    # 6) operadora sempre igual ao prestador (AMHP não fornece)
+    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].astype(str).str.strip()
+    df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
+
+    # 7) chaves
+    df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
+    df["chave_oper"] = df["numeroGuiaOperadora"] + "__" + df["codigo_procedimento_norm"]
+
+    # 8) separa código glosa
+    df = tratar_codigo_glosa(df)
+
+    return df.reset_index(drop=True)
+
+
+# =========================================================
+# Auto-detecção "genérica" (fallback)
+# =========================================================
+
 _COLMAPS = {
-    'lote'       : [r'\blote\b'],
-    'competencia': [r'compet|m[eê]s|period|refer'],
-    'guia_prest' : [r'\bguia\b'],       # sua planilha usa apenas "Guia"
-    'guia_oper'  : [r'\bguia\b'],       # usamos a mesma coluna para operadora (melhora casamento)
-    'cod_proc'   : [r'cod.*proced|proced.*cod|tuss|cod\.\s*proced'],
-    'desc_proc'  : [r'descri.*proced|proced.*descr|^descri|descri[cç][aã]o'],
-    'qtd_apres'  : [r'qt|quant|qtd|quant\.\s*exec|quantidade.*exec'],
-    'qtd_paga'   : [r'qt|quant|qtd|quant\.\s*paga|quantidade.*paga|autori|aprov'],
-    'val_apres'  : [r'valor.*apres|apresent|cobrado'],
-    'val_glosa'  : [r'\bglosa\b|glosado|glosada'],
-    'val_pago'   : [r'valor.*(pago|apurado|liberado|aprovado)$|(pago|apurado|liberado)$'],
-    # seu layout traz "Código Glosa" com "NNNN - DESCRIÇÃO"
-    'motivo_cod' : [r'c[oó]d.*glosa|glosa'],
-    'motivo_desc': [r'glosa|descri.*glosa'],
+    "lote": [r"\blote\b"],
+    "competencia": [r"compet|m[eê]s|refer"],
+    "guia_prest": [r"\bguia\b"],
+    "guia_oper": [r"\bguia\b"],
+    "cod_proc": [r"cod.*proced|proced.*cod|tuss"],
+    "desc_proc": [r"descr"],
+    "qtd_apres": [r"quant|qtd"],
+    "qtd_paga": [r"quant|qtd"],
+    "val_apres": [r"apres|cobrado"],
+    "val_glosa": [r"glosa"],
+    "val_pago": [r"pago|liberado|apurado"],
+    "motivo_cod": [r"glosa"],
+    "motivo_desc": [r"glosa"],
 }
 
-def _match_col(cols: List[str], pats: List[str]) -> Optional[str]:
+def _match_col(cols, pats):
     norm = {c: _normtxt(c) for c in cols}
     for c, cn in norm.items():
-        ok = True
-        for p in pats:
-            if not re.search(p, cn):
-                ok = False
-                break
-        if ok:
+        if all(re.search(p, cn) for p in pats):
             return c
     return None
 
-def _find_header_row(df_raw: pd.DataFrame) -> int:
-    """
-    Heurística igual ao seu relatório:
-      - se a 1ª coluna em alguma linha tem 'CPF/CNPJ', o cabeçalho está na linha seguinte.
-    """
-    try:
-        s0 = df_raw.iloc[:, 0].astype(str).str.strip().map(_normtxt)
-        mask = s0.eq("cpf/cnpj")
-        if mask.any():
-            return int(mask.idxmax()) + 1
-    except Exception:
-        pass
-    return 0
 
-# ---------- Tratamento do campo "Código Glosa" → separa código e descrição ----------
-def tratar_codigo_glosa(df_demo: pd.DataFrame) -> pd.DataFrame:
-    """
-    Se houver coluna 'Código Glosa' no formato 'NNNN - DESCRIÇÃO', separa em:
-      - motivo_glosa_codigo
-      - motivo_glosa_descricao
-    """
-    if 'Código Glosa' not in df_demo.columns:
-        return df_demo
+def _apply_manual_map(df, mapping):
+    """Mesma lógica anterior (resumida aqui)."""
 
-    gl = df_demo['Código Glosa'].astype(str).fillna('')
-
-    df_demo['motivo_glosa_codigo']    = gl.str.extract(r'^(\d+)')
-    df_demo['motivo_glosa_descricao'] = gl.str.extract(r'^\s*\d+\s*-\s*(.*)$')
-
-    df_demo['motivo_glosa_codigo']    = df_demo['motivo_glosa_codigo'].fillna('').str.strip()
-    df_demo['motivo_glosa_descricao'] = df_demo['motivo_glosa_descricao'].fillna('').str.strip()
-    return df_demo
-
-# ---------- Aplica mapeamento manual do wizard ----------
-def _apply_manual_map(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
-    def pick(key: str):
-        c = mapping.get(key)
+    def pick(k):
+        c = mapping.get(k)
         if not c or c == "(não usar)" or c not in df.columns:
             return None
         return df[c]
 
     out = pd.DataFrame({
-        'numero_lote'           : pick('lote'),
-        'competencia'           : pick('competencia'),
-        'numeroGuiaPrestador'   : pick('guia_prest'),
-        'numeroGuiaOperadora'   : pick('guia_oper'),
-        'codigo_procedimento'   : pick('cod_proc'),
-        'descricao_procedimento': pick('desc_proc'),
-        'quantidade_apresentada': pd.to_numeric(pick('qtd_apres'), errors='coerce') if pick('qtd_apres') is not None else 0,
-        'quantidade_paga'       : pd.to_numeric(pick('qtd_paga'), errors='coerce')  if pick('qtd_paga')  is not None else 0,
-        'valor_apresentado'     : pd.to_numeric(pick('val_apres'), errors='coerce') if pick('val_apres') is not None else 0,
-        'valor_glosa'           : pd.to_numeric(pick('val_glosa'), errors='coerce') if pick('val_glosa') is not None else 0,
-        'valor_pago'            : pd.to_numeric(pick('val_pago'), errors='coerce')  if pick('val_pago')  is not None else 0,
-        # se o wizard apontar diretamente para colunas já separadas
-        'motivo_glosa_codigo'   : pick('motivo_cod'),
-        'motivo_glosa_descricao': pick('motivo_desc'),
+        "numero_lote": pick("lote"),
+        "competencia": pick("competencia"),
+        "numeroGuiaPrestador": pick("guia_prest"),
+        "numeroGuiaOperadora": pick("guia_oper"),
+        "codigo_procedimento": pick("cod_proc"),
+        "descricao_procedimento": pick("desc_proc"),
+        "quantidade_apresentada": pd.to_numeric(pick("qtd_apres"), errors="coerce")
+                                   if pick("qtd_apres") is not None else 0,
+        "quantidade_paga": pd.to_numeric(pick("qtd_paga"), errors="coerce")
+                                   if pick("qtd_paga") is not None else 0,
+        "valor_apresentado": pd.to_numeric(pick("val_apres"), errors="coerce")
+                                   if pick("val_apres") is not None else 0,
+        "valor_glosa": pd.to_numeric(pick("val_glosa"), errors="coerce")
+                                   if pick("val_glosa") is not None else 0,
+        "valor_pago": pd.to_numeric(pick("val_pago"), errors="coerce")
+                                   if pick("val_pago") is not None else 0,
+        "motivo_glosa_codigo": pick("motivo_cod"),
+        "motivo_glosa_descricao": pick("motivo_desc"),
     })
 
-    # normalizações
-    for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
-        if c in out:
-            out[c] = out[c].astype(str).str.strip()
+    for c in ["numero_lote", "numeroGuiaPrestador", "numeroGuiaOperadora", "codigo_procedimento"]:
+        out[c] = out[c].astype(str).str.strip()
 
-    for c in ['valor_apresentado','valor_glosa','valor_pago','quantidade_apresentada','quantidade_paga']:
-        if c in out:
-            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
+    for c in ["valor_apresentado", "valor_glosa", "valor_pago", "quantidade_apresentada", "quantidade_paga"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
 
-    # chaves
-    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(lambda s: normalize_code(s))
-    out['chave_prest'] = out['numeroGuiaPrestador'].astype(str).str.strip() + "__" + out['codigo_procedimento_norm']
-    out['chave_oper']  = out['numeroGuiaOperadora'].astype(str).str.strip() + "__" + out['codigo_procedimento_norm']
-    return out
-
-# ---------- Leitura do Demonstrativo (.xlsx) ----------
-def ler_demo_itens_pagto_xlsx(
-    source,
-    strip_zeros_codes: bool = False,
-    manual_map: Optional[Dict[str, Optional[str]]] = None,
-    prefer_sheet: Optional[str] = None
-) -> pd.DataFrame:
-    """
-    Lê o Demonstrativo itemizado e devolve colunas normalizadas para conciliação.
-    - Se 'manual_map' for fornecido, usa o mapeamento do wizard.
-    - Tenta achar o cabeçalho pela linha 'CPF/CNPJ' na 1ª coluna (como no seu arquivo).
-    - Auto-detecção de colunas por regex, compatível com o layout enviado.
-    """
-    xls = pd.ExcelFile(source, engine='openpyxl')
-
-    # Escolhe a aba
-    if prefer_sheet and prefer_sheet in xls.sheet_names:
-        sheet = prefer_sheet
-    else:
-        # tenta achar uma aba "DemonstrativoAnaliseDeContas" ou similar
-        sheet = None
-        for s in xls.sheet_names:
-            s_norm = _normtxt(s)
-            if 'analise' in s_norm or 'análise' in s_norm or 'demonstr' in s_norm or 'conta' in s_norm:
-                sheet = s
-                break
-        sheet = sheet or xls.sheet_names[0]
-
-    # Lê e encontra o cabeçalho
-    df_raw = pd.read_excel(source, sheet_name=sheet, engine='openpyxl')
-    hdr = _find_header_row(df_raw)
-    df = df_raw.copy()
-    if hdr > 0:
-        df.columns = df_raw.iloc[hdr]
-        df = df_raw.iloc[hdr + 1:].reset_index(drop=True)
-
-    if manual_map:
-        return _apply_manual_map(df, manual_map)
-
-    # Auto-detecção de colunas
-    cols = [str(c) for c in df.columns]
-    pick = {k: _match_col(cols, v) for k, v in _COLMAPS.items()}
-
-    # Campos mínimos: código procedimento + pelo menos um valor financeiro
-    if not pick.get('cod_proc') or not (pick.get('val_apres') or pick.get('val_glosa') or pick.get('val_pago')):
-        raise ValueError("Não identifiquei colunas itemizadas no Demonstrativo (auto). Use o mapeamento manual.")
-
-    def col(c): return pick.get(c)
-
-    out = pd.DataFrame({
-        'numero_lote'           : df[col('lote')] if col('lote') else None,
-        'competencia'           : df[col('competencia')] if col('competencia') else None,
-        'numeroGuiaPrestador'   : df[col('guia_prest')] if col('guia_prest') else None,
-        'numeroGuiaOperadora'   : df[col('guia_oper')] if col('guia_oper') else None,
-        'codigo_procedimento'   : df[col('cod_proc')] if col('cod_proc') else None,
-        'descricao_procedimento': df[col('desc_proc')] if col('desc_proc') else None,
-        'quantidade_apresentada': pd.to_numeric(df[col('qtd_apres')], errors='coerce') if col('qtd_apres') else 0.0,
-        'quantidade_paga'       : pd.to_numeric(df[col('qtd_paga')], errors='coerce')  if col('qtd_paga')  else 0.0,
-        'valor_apresentado'     : pd.to_numeric(df[col('val_apres')], errors='coerce') if col('val_apres') else 0.0,
-        'valor_glosa'           : pd.to_numeric(df[col('val_glosa')], errors='coerce') if col('val_glosa') else 0.0,
-        'valor_pago'            : pd.to_numeric(df[col('val_pago')], errors='coerce')  if col('val_pago')  else 0.0,
-        # Se o auto-map encontrar campos de motivo já separados
-        'motivo_glosa_codigo'   : df[col('motivo_cod')] if col('motivo_cod') else None,
-        'motivo_glosa_descricao': df[col('motivo_desc')] if col('motivo_desc') else None,
-        # Mantém coluna bruta caso exista (para tratamento posterior)
-        'Código Glosa'          : df['Código Glosa'] if 'Código Glosa' in df.columns else None,
-    })
-
-    # Normalizações
-    for c in ['numero_lote', 'numeroGuiaPrestador', 'numeroGuiaOperadora', 'codigo_procedimento']:
-        if c in out.columns and out[c] is not None:
-            out[c] = out[c].astype(str).str.strip()
-
-    for c in ['valor_apresentado', 'valor_glosa', 'valor_pago', 'quantidade_apresentada', 'quantidade_paga']:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
-
-    # Códigos normalizados e chaves
-    out['codigo_procedimento_norm'] = out['codigo_procedimento'].astype(str).map(
-        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
-    )
-    out['chave_prest'] = out['numeroGuiaPrestador'].astype(str).str.strip() + '__' + out['codigo_procedimento_norm']
-    out['chave_oper']  = out['numeroGuiaOperadora'].astype(str).str.strip() + '__' + out['codigo_procedimento_norm']
+    out["codigo_procedimento_norm"] = out["codigo_procedimento"].map(lambda s: normalize_code(s))
+    out["chave_prest"] = out["numeroGuiaPrestador"] + "__" + out["codigo_procedimento_norm"]
+    out["chave_oper"] = out["numeroGuiaOperadora"] + "__" + out["codigo_procedimento_norm"]
 
     return out
 
-# ---------- Wizard de mapeamento manual (UI) ----------
-def _mapping_wizard_for_demo(uploaded_file) -> Optional[pd.DataFrame]:
-    """
-    Exibe UI para mapear colunas do demonstrativo manualmente e retorna o DataFrame mapeado.
-    O resultado é salvo em st.session_state['demo_mappings'] para uso futuro.
-    """
-    st.warning(f"Precisamos mapear manualmente o demonstrativo: **{uploaded_file.name}**")
+
+# =========================================================
+# Wizard manual (quando necessário)
+# =========================================================
+
+def _mapping_wizard_for_demo(uploaded_file):
+    """Wizard completo, igual ao anterior, porém agora com persistência automática."""
+
+    st.warning(f"Mapeamento manual necessário para: **{uploaded_file.name}**")
 
     try:
-        xls = pd.ExcelFile(uploaded_file, engine='openpyxl')
+        xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
     except Exception as e:
-        st.error(f"Não consegui abrir o arquivo: {e}")
+        st.error(f"Erro abrindo arquivo: {e}")
         return None
 
-    # Escolhe a aba
     sheet = st.selectbox(
-        f"Aba (sheet) do demonstrativo **{uploaded_file.name}**",
+        f"Aba (sheet) do demonstrativo {uploaded_file.name}",
         xls.sheet_names,
         key=f"map_sheet_{uploaded_file.name}"
     )
 
-    df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, engine='openpyxl')
-    st.markdown("Prévia da planilha (15 primeiras linhas):")
+    df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
     st.dataframe(df_raw.head(15), use_container_width=True)
 
     cols = [str(c) for c in df_raw.columns]
 
-    st.markdown("### Mapeie as colunas")
     fields = [
-        ('lote', 'Lote (opcional)'),
-        ('competencia', 'Competência (opcional)'),
-        ('guia_prest', 'Número da Guia (Prestador)'),
-        ('guia_oper', 'Número da Guia (Operadora) (opcional)'),
-        ('cod_proc', 'Código do Procedimento (TUSS / interno)'),
-        ('desc_proc', 'Descrição do Procedimento (opcional)'),
-        ('qtd_apres', 'Quantidade Apresentada (opcional)'),
-        ('qtd_paga',  'Quantidade Paga/Autorizada (opcional)'),
-        ('val_apres', 'Valor Apresentado'),
-        ('val_glosa', 'Valor Glosa'),
-        ('val_pago',  'Valor Pago/Apurado'),
-        ('motivo_cod', 'Motivo de Glosa (Código) (opcional)'),
-        ('motivo_desc','Motivo de Glosa (Descrição) (opcional)'),
+        ("lote", "Lote"),
+        ("competencia", "Competência"),
+        ("guia_prest", "Guia Prestador"),
+        ("guia_oper", "Guia Operadora"),
+        ("cod_proc", "Código Procedimento"),
+        ("desc_proc", "Descrição Procedimento"),
+        ("qtd_apres", "Quantidade Apresentada"),
+        ("qtd_paga", "Quantidade Paga"),
+        ("val_apres", "Valor Apresentado"),
+        ("val_glosa", "Valor Glosa"),
+        ("val_pago", "Valor Pago"),
+        ("motivo_cod", "Código Glosa"),
+        ("motivo_desc", "Descrição Motivo Glosa"),
     ]
 
-    def _default_for(key: str) -> int:
+    # sugestionador automático
+    def _default(k):
+        pats = _COLMAPS.get(k, [])
         for i, c in enumerate(cols):
-            cn = _normtxt(c)
-            pats = _COLMAPS.get(key, [])
-            if any(re.search(p, cn) for p in pats):
-                return i + 1  # +1 pela opção "(não usar)"
+            if any(re.search(p, _normtxt(c)) for p in pats):
+                return i + 1
         return 0
 
-    mapping: Dict[str, Optional[str]] = {}
-    for key, label in fields:
-        opt = ['(não usar)'] + cols
-        idx = _default_for(key)
-        sel = st.selectbox(label, opt, index=idx, key=f"map_{uploaded_file.name}_{key}")
-        mapping[key] = None if sel == '(não usar)' else sel
+    mapping = {}
+    for k, label in fields:
+        opt = ["(não usar)"] + cols
+        sel = st.selectbox(label, opt, index=_default(k), key=f"{uploaded_file.name}_{k}")
+        mapping[k] = None if sel == "(não usar)" else sel
 
-    st.caption("Campos mínimos: **Código do Procedimento** e pelo menos um de **Valor Apresentado/Glosa/Pago**.")
-    do_map = st.button(
-        f"Usar este mapeamento para {uploaded_file.name}",
-        type="primary",
-        key=f"btn_map_{uploaded_file.name}"
-    )
-    if not do_map:
-        return None
+    if st.button(f"Salvar mapeamento de {uploaded_file.name}", type="primary"):
+        st.session_state["demo_mappings"][uploaded_file.name] = {
+            "sheet": sheet,
+            "columns": mapping
+        }
+        save_demo_mappings(st.session_state["demo_mappings"])
 
-    # Salva mapeamento na sessão
-    st.session_state.setdefault('demo_mappings', {})
-    st.session_state['demo_mappings'][uploaded_file.name] = {'sheet': sheet, 'columns': mapping}
+        try:
+            df = _apply_manual_map(df_raw, mapping)
+            df = tratar_codigo_glosa(df)
+            st.success("Mapeamento salvo com sucesso!")
+            return df
+        except Exception as e:
+            st.error(f"Erro aplicando mapeamento: {e}")
+            return None
 
-    # Aplica o mapeamento
-    try:
-        df_mapped = ler_demo_itens_pagto_xlsx(
-            uploaded_file,
-            manual_map=mapping,
-            prefer_sheet=sheet
-        )
-        # separa código/descrição de glosa se vier em "Código Glosa"
-        df_mapped = tratar_codigo_glosa(df_mapped)
-        st.success("Mapeamento aplicado com sucesso!")
-        return df_mapped
-    except Exception as e:
-        st.error(f"Falha aplicando mapeamento: {e}")
-        return None
+    return None
 
-# ---------- Loader robusto do Demonstrativo (chamado FORA do botão) ----------
-def build_demo_df(demo_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    """
-    Lê todos os demonstrativos:
-      - usa mapeamento salvo na sessão se existir
-      - tenta auto-detecção
-      - se falhar, abre wizard p/ mapear manualmente (sem resetar ao reexecutar)
-    Retorna um único DataFrame concatenado.
-    """
-    parts: List[pd.DataFrame] = []
+
+# =========================================================
+# Loader principal do demonstrativo (AMHP → auto; outros → auto/wizard)
+# =========================================================
+
+def build_demo_df(demo_files, strip_zeros_codes=False):
     if not demo_files:
         return pd.DataFrame()
 
-    st.session_state.setdefault('demo_mappings', {})
+    parts = []
+    st.session_state.setdefault("demo_mappings", load_demo_mappings())
 
     for f in demo_files:
-        if hasattr(f, 'seek'):
-            f.seek(0)
-        fname = getattr(f, 'name', 'demo.xlsx')
+        fname = f.name
 
-        # 1) Usa mapeamento salvo, se houver
-        mapping_info = st.session_state['demo_mappings'].get(fname)
-        if mapping_info:
-            try:
-                df_demo = ler_demo_itens_pagto_xlsx(
-                    f,
-                    strip_zeros_codes=strip_zeros_codes,
-                    manual_map=mapping_info.get('columns'),
-                    prefer_sheet=mapping_info.get('sheet')
-                )
-                df_demo = tratar_codigo_glosa(df_demo)
-
-                # Se operadora não estiver preenchida, replicamos Guia (melhora casamento por chave_oper)
-                if 'numeroGuiaOperadora' in df_demo.columns and df_demo['numeroGuiaOperadora'].isna().all():
-                    df_demo['numeroGuiaOperadora'] = df_demo['numeroGuiaPrestador']
-
-                parts.append(df_demo)
-                continue
-            except Exception as e:
-                st.warning(f"Mapeamento salvo para '{fname}' falhou ({e}). Tentando auto-detecção...")
-
-        # 2) Tenta auto-detecção
+        # 1) tenta leitor AMHP automático
         try:
-            df_demo = ler_demo_itens_pagto_xlsx(f, strip_zeros_codes=strip_zeros_codes)
-            df_demo = tratar_codigo_glosa(df_demo)
-
-            if 'numeroGuiaOperadora' in df_demo.columns and df_demo['numeroGuiaOperadora'].isna().all():
-                df_demo['numeroGuiaOperadora'] = df_demo['numeroGuiaPrestador']
-
+            df_demo = ler_demo_amhp_fixado(f, strip_zeros_codes=strip_zeros_codes)
             parts.append(df_demo)
             continue
         except Exception:
-            # 3) Abre wizard manual
-            with st.expander(f"⚙️ Configurar mapeamento para: {fname}", expanded=True):
-                df_manual = _mapping_wizard_for_demo(f)
-                if df_manual is not None:
-                    if 'numeroGuiaOperadora' in df_manual.columns and df_manual['numeroGuiaOperadora'].isna().all():
-                        df_manual['numeroGuiaOperadora'] = df_manual['numeroGuiaPrestador']
-                    parts.append(df_manual)
-                else:
-                    st.error(f"Não foi possível mapear o demonstrativo '{fname}'. Preencha o mapeamento acima.")
+            pass
+
+        # 2) usa mapeamento persistido (se existir)
+        mapping_info = st.session_state["demo_mappings"].get(fname)
+        if mapping_info:
+            try:
+                df_demo = ler_demo_amhp_fixado(f, strip_zeros_codes=strip_zeros_codes)  # fallback natural
+            except:
+                df_demo = _apply_manual_map(
+                    pd.read_excel(f, sheet_name=mapping_info["sheet"], engine="openpyxl"),
+                    mapping_info["columns"]
+                )
+            df_demo = tratar_codigo_glosa(df_demo)
+            parts.append(df_demo)
+            continue
+
+        # 3) auto-detecção genérica
+        try:
+            xls = pd.ExcelFile(f, engine="openpyxl")
+            sheet = xls.sheet_names[0]
+            df_raw = pd.read_excel(f, sheet_name=sheet, engine="openpyxl")
+
+            cols = [str(c) for c in df_raw.columns]
+            pick = {k: _match_col(cols, v) for k, v in _COLMAPS.items()}
+
+            if pick.get("cod_proc"):
+                df_demo = _apply_manual_map(df_raw, pick)
+                df_demo = tratar_codigo_glosa(df_demo)
+                parts.append(df_demo)
+                continue
+        except:
+            pass
+
+        # 4) wizard manual como último recurso
+        with st.expander(f"⚙️ Mapear manualmente: {fname}", expanded=True):
+            df_manual = _mapping_wizard_for_demo(f)
+            if df_manual is not None:
+                parts.append(df_manual)
+            else:
+                st.error(f"Não foi possível mapear o demonstrativo '{fname}'.")
 
     if parts:
         return pd.concat(parts, ignore_index=True)
