@@ -234,46 +234,46 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             })
             out.append(it)
 
-   
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        aut = guia.find('ans:dadosAutorizacao', ANS_NS)
-
-        # 1) Guia Prestador (sempre no cabeçalho)
+        aut = guia.find('ans:dadosAutorizacao', ANS_NS) # NOVO: Local da guia operadora
+        
+        # --- SITUAÇÃO 1: Busca a Guia do Prestador (Ex: 8524664) ---
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
         if not numero_guia_prest and cab is not None:
             numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
 
-        # 2) Guia Operadora (sempre na autorização — PRIORIDADE MÁXIMA)
+        # --- SITUAÇÃO 2: Busca a Guia da Operadora (Ex: 8530641) ---
         numero_guia_oper = ""
         if aut is not None:
             numero_guia_oper = tx(aut.find('ans:numeroGuiaOperadora', ANS_NS))
-
-        # 3) Se não veio em dadosAutorizacao, tenta no cabeçalho
+        
+        # Fallback: Se não achou em autorização, tenta no cabeçalho
         if not numero_guia_oper and cab is not None:
             numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS))
 
-        # ❗ Nunca sobrescrever a guia operadora com a do prestador
-        # Se não existe, deixa vazio, assim a conciliação não cria chave falsa
-    
+        # Garante que o campo operadora não fique vazio
+        if not numero_guia_oper:
+            numero_guia_oper = numero_guia_prest
+
+        # --- Coleta de dados gerais da guia ---
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
-
+        
         for it in _itens_sadt(guia):
             it.update({
                 'arquivo': nome,
                 'numero_lote': numero_lote,
                 'tipo_guia': 'SADT',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': numero_guia_oper,  # sempre o certo aqui
+                'numeroGuiaOperadora': numero_guia_oper, # Importante: envia o 8530641 para a conciliação
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
             })
             out.append(it)
-
 
     return out
 
@@ -360,17 +360,11 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
-  
+
     # 7) Criação das Chaves de Conciliação
-    # AMHP: A coluna "Guia" representa a GUIA DA OPERADORA
     df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
-
-    # A AMHP NÃO fornece a guia prestador no demonstrativo
-    df["numeroGuiaPrestador"] = ""
-
-    # Chaves
-    df["chave_oper"] = df["numeroGuiaOperadora"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
-    df["chave_prest"] = "__" + df["codigo_procedimento_norm"].astype(str)   # nunca casa, mas é o correto
+    df["chave_prest"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
+    df["chave_oper"] = df["chave_prest"]
 
     # 8) Tratamento da Glosa (separar código de texto)
     if "codigo_glosa_bruto" in df.columns:
