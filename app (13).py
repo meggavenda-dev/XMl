@@ -362,9 +362,7 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
 
     # 7) Criação das Chaves de Conciliação
-    df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
-    df["chave_prest"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
-    df["chave_oper"] = df["chave_prest"]
+    df["chave_demo"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
 
     # 8) Tratamento da Glosa (separar código de texto)
     if "codigo_glosa_bruto" in df.columns:
@@ -595,69 +593,76 @@ def conciliar_itens(
     fallback_por_descricao: bool = False,
 ) -> Dict[str, pd.DataFrame]:
 
-    # 1ª tentativa — pela chave do Prestador
-    m1 = df_xml.merge(df_demo, on="chave_prest", how="left", suffixes=("_xml", "_demo"))
+    # --- 1ª TENTATIVA: Match pela Chave do Prestador ---
+    m1 = df_xml.merge(df_demo, left_on="chave_prest", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # Registros ainda sem match (sempre do lado do XML)
+    # Separar o que não casou para a próxima tentativa
     restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
+    
+    # Resetar colunas para evitar conflitos de nomes do merge anterior
+    cols_xml = df_xml.columns.tolist()
 
-    # 2ª tentativa — pela chave da Operadora
-    cols_for_second_join = [c for c in _XML_CORE_COLS if c in restante.columns]
-    still_xml = restante[cols_for_second_join].copy()
-
-    m2 = still_xml.merge(df_demo, on="chave_oper", how="left", suffixes=("_xml", "_demo"))
+    # --- 2ª TENTATIVA: Match pela Chave da Operadora (Autorização) ---
+    # É aqui que resolvemos o caso da guia 8530641 do demonstrativo casando com a autorização do XML
+    m2 = restante[cols_xml].merge(df_demo, left_on="chave_oper", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
+    # Unir os sucessos iniciais
     conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
-    # Fallback opcional por descrição + valor (ainda partindo do XML)
+    # --- 3ª TENTATIVA (OPCIONAL): Fallback por Descrição + Valor ---
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
-        rem1 = m1[m1["matched_on"] == ""].copy()
-        rem2 = m2[m2["matched_on"] == ""].copy()
-        rem1 = _alias_xml_cols(rem1)
-        rem2 = _alias_xml_cols(rem2)
-        rem_xml = pd.concat([rem1, rem2], ignore_index=True)
-        if not rem_xml.empty:
-            rem_xml["guia_join"] = rem_xml.apply(
-                lambda r: r["numeroGuiaPrestador"] if str(r.get("numeroGuiaPrestador","")).strip()
-                else str(r.get("numeroGuiaOperadora","")).strip(), axis=1
+        # Pega apenas o que sobrou da 2ª tentativa
+        ainda_sem_match = m2[m2["matched_on"] == ""].copy()
+        ainda_sem_match = _alias_xml_cols(ainda_sem_match)
+        
+        if not ainda_sem_match.empty:
+            # Normalizar guias para o join genérico
+            ainda_sem_match["guia_join"] = ainda_sem_match.apply(
+                lambda r: str(r.get("numeroGuiaPrestador", "")).strip() or str(r.get("numeroGuiaOperadora", "")).strip(), axis=1
             )
             df_demo2 = df_demo.copy()
-            df_demo2["guia_join"] = df_demo2.apply(
-                lambda r: r["numeroGuiaPrestador"] if str(r.get("numeroGuiaPrestador","")).strip()
-                else str(r.get("numeroGuiaOperadora","")).strip(), axis=1
-            )
-            if "descricao_procedimento" in rem_xml.columns and "descricao_procedimento" in df_demo2.columns:
-                tmp = rem_xml.merge(df_demo2, on=["guia_join","descricao_procedimento"], how="left", suffixes=("_xml","_demo"))
+            df_demo2["guia_join"] = df_demo2["numeroGuiaPrestador"].astype(str).str.strip()
+
+            if "descricao_procedimento" in ainda_sem_match.columns and "descricao_procedimento" in df_demo2.columns:
+                tmp = ainda_sem_match[cols_xml + ["guia_join"]].merge(
+                    df_demo2, on=["guia_join", "descricao_procedimento"], how="left", suffixes=("_xml", "_demo")
+                )
                 tol = float(tolerance_valor)
                 keep = (tmp["valor_apresentado"].notna() & ((tmp["valor_total"] - tmp["valor_apresentado"]).abs() <= tol))
                 fallback_matches = tmp[keep].copy()
+                
                 if not fallback_matches.empty:
                     fallback_matches["matched_on"] = "descricao+valor"
                     conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
-    # Apenas XML sem match (DEMO extra fica ignorado por construção)
-    unmatch = pd.concat([
-        m1[m1["matched_on"] == ""],
-        m2[m2["matched_on"] == ""],
-        fallback_matches[fallback_matches.get("matched_on","") == ""] if not fallback_matches.empty else pd.DataFrame()
-    ], ignore_index=True)
+    # --- FINALIZAÇÃO: Itens Não Casados (Unmatch) ---
+    # O unmatch final deve ser o que sobrou da 2ª tentativa, removendo o que o fallback (se ativo) resolveu
+    if not fallback_matches.empty:
+        chaves_resolvidas_fallback = fallback_matches["chave_prest"].unique()
+        unmatch = m2[(m2["matched_on"] == "") & (~m2["chave_prest"].isin(chaves_resolvidas_fallback))].copy()
+    else:
+        unmatch = m2[m2["matched_on"] == ""].copy()
+
     unmatch = _alias_xml_cols(unmatch)
+    
+    # Limpeza de duplicidade visual no unmatch
     if not unmatch.empty:
-        subset_cols = [c for c in ["arquivo","numero_lote","tipo_guia","numeroGuiaPrestador","codigo_procedimento","valor_total"] if c in unmatch.columns]
+        subset_cols = [c for c in ["arquivo", "numeroGuiaPrestador", "codigo_procedimento", "valor_total"] if c in unmatch.columns]
         if subset_cols:
             unmatch = unmatch.drop_duplicates(subset=subset_cols)
 
+    # --- CÁLCULOS TÉCNICOS ---
     if not conc.empty:
         conc = _alias_xml_cols(conc)
         conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
         conc["glosa_pct"] = conc.apply(
-            lambda r: (r["valor_glosa"]/r["valor_apresentado"]) if r.get("valor_apresentado",0) and r["valor_apresentado"]>0 else 0.0,
+            lambda r: (r["valor_glosa"] / r["valor_apresentado"]) if r.get("valor_apresentado", 0) > 0 else 0.0,
             axis=1
         )
 
