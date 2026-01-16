@@ -210,7 +210,14 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     # CONSULTA
     for guia in root.findall('.//ans:guiaConsulta', ANS_NS):
+        cab = guia.find('ans:cabecalhoGuia', ANS_NS)
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        
+        # Tenta pegar a guia da operadora se existir no XML de consulta
+        numero_guia_oper = tx(guia.find('ans:numeroGuiaOperadora', ANS_NS))
+        if not numero_guia_oper:
+            numero_guia_oper = numero_guia_prest # Se não tiver, usa a do prestador
+            
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
@@ -220,7 +227,7 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
                 'numero_lote': numero_lote,
                 'tipo_guia': 'CONSULTA',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': '',
+                'numeroGuiaOperadora': numero_guia_oper, # CAMPO CORRIGIDO
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
@@ -230,18 +237,38 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS)) if cab is not None else ''
-        numero_guia_oper  = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS)) if cab is not None else ''
+        aut = guia.find('ans:dadosAutorizacao', ANS_NS) # NOVO: Local da guia operadora
+        
+        # --- SITUAÇÃO 1: Busca a Guia do Prestador (Ex: 8524664) ---
+        numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
+        if not numero_guia_prest and cab is not None:
+            numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
+
+        # --- SITUAÇÃO 2: Busca a Guia da Operadora (Ex: 8530641) ---
+        numero_guia_oper = ""
+        if aut is not None:
+            numero_guia_oper = tx(aut.find('ans:numeroGuiaOperadora', ANS_NS))
+        
+        # Fallback: Se não achou em autorização, tenta no cabeçalho
+        if not numero_guia_oper and cab is not None:
+            numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS))
+
+        # Garante que o campo operadora não fique vazio
+        if not numero_guia_oper:
+            numero_guia_oper = numero_guia_prest
+
+        # --- Coleta de dados gerais da guia ---
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
+        
         for it in _itens_sadt(guia):
             it.update({
                 'arquivo': nome,
                 'numero_lote': numero_lote,
                 'tipo_guia': 'SADT',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': numero_guia_oper,
+                'numeroGuiaOperadora': numero_guia_oper, # Importante: envia o 8530641 para a conciliação
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
@@ -267,23 +294,36 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
     df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
     return df
 
+
+
+
 def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    df_raw = _cached_read_excel(path, 0)
+    # 1) Lê o arquivo bruto para localizar o cabeçalho
+    # Se for CSV (como o detectado), usa read_csv; se for Excel, read_excel
+    try:
+        df_raw = pd.read_excel(path, header=None, engine="openpyxl")
+    except:
+        df_raw = pd.read_csv(path, header=None)
+
+    # 2) Localiza a linha do cabeçalho (onde está a coluna CPF/CNPJ)
     header_row = None
-    for i in range(min(30, len(df_raw))):
-        row_txt = df_raw.iloc[i].astype(str).str.lower().tolist()
-        if any("cpf/cnpj" == c for c in row_txt):
+    for i in range(min(20, len(df_raw))):
+        row_values = df_raw.iloc[i].astype(str).tolist()
+        if any("CPF/CNPJ" in str(val).upper() for val in row_values):
             header_row = i
             break
+    
     if header_row is None:
-        raise ValueError("Cabeçalho AMHP não encontrado (coluna CPF/CNPJ).")
+        raise ValueError("Não foi possível localizar a linha de cabeçalho 'CPF/CNPJ' no demonstrativo.")
 
+    # 3) Lê novamente a partir do cabeçalho correto
     df = df_raw.iloc[header_row + 1:].copy()
     df.columns = df_raw.iloc[header_row]
-    df.columns = [c if not str(c).lower().startswith("unnamed") else "" for c in df.columns]
-    df = df.loc[:, df.columns != ""]
+    
+    # Remove colunas sem nome (Unnamed)
+    df = df.loc[:, df.columns.notna()]
 
-    # Renomeia para padrão interno
+    # 4) Renomeia para o padrão interno do seu código
     ren = {
         "Guia": "numeroGuiaPrestador",
         "Cod. Procedimento": "codigo_procedimento",
@@ -292,28 +332,49 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
         "Valor Apurado": "valor_pago",
         "Valor Glosa": "valor_glosa",
         "Quant. Exec.": "quantidade_apresentada",
-        "Código Glosa": "Código Glosa",
+        "Código Glosa": "codigo_glosa_bruto", # Para processar depois
     }
     df = df.rename(columns=ren)
 
-    for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    # 5) Limpeza Crítica: Guia e Código
+    def clean_guia(val):
+        s = str(val).strip().split('.')[0] # Remove .0
+        return s.lstrip('0') # Remove zeros à esquerda para alinhar com XML
 
+    # Limpeza da Guia para evitar que o Pandas leia como 8524664.0
+    df["numeroGuiaPrestador"] = (
+        df["numeroGuiaPrestador"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.strip()
+        .str.lstrip("0")
+    )
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
+    
+    # Normalização de códigos (procedimentos e materiais)
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
-    df["numeroGuiaPrestador"] = df["numeroGuiaPrestador"].astype(str).str.strip()
+
+    # 6) Conversão Numérica
+    for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
+
+    # 7) Criação das Chaves de Conciliação
     df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
-    df["chave_prest"] = df["numeroGuiaPrestador"] + "__" + df["codigo_procedimento_norm"]
-    df["chave_oper"] = df["numeroGuiaOperadora"] + "__" + df["codigo_procedimento_norm"]
+    df["chave_prest"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
+    df["chave_oper"] = df["chave_prest"]
 
-    if "Competência" in df.columns and "competencia" not in df.columns:
-        df["competencia"] = df["Competência"].astype(str)
+    # 8) Tratamento da Glosa (separar código de texto)
+    if "codigo_glosa_bruto" in df.columns:
+        df["motivo_glosa_codigo"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^(\d+)")
+        df["motivo_glosa_descricao"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^\d+\s*-\s*(.*)")
+        df["motivo_glosa_codigo"] = df["motivo_glosa_codigo"].fillna("").str.strip()
+        df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
 
-    df = tratar_codigo_glosa(df)
     return df.reset_index(drop=True)
+
 
 # Auto-detecção genérica (fallback)
 _COLMAPS = {
@@ -499,7 +560,7 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
-                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
+                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
     df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
     return df
