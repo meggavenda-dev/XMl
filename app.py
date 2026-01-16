@@ -362,20 +362,9 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
 
     # 7) Criação das Chaves de Conciliação
-
-    # No demonstrativo AMHP, a coluna "Guia" é SEMPRE a GUIA DA OPERADORA
     df["numeroGuiaOperadora"] = df["numeroGuiaPrestador"]
-
-    # A AMHP NÃO envia guia do prestador no demonstrativo
-    df["numeroGuiaPrestador"] = ""
-
-    # CHAVES:
-    # Prestador -> nunca casa, mas é correto deixar assim
-    df["chave_prest"] = "__" + df["codigo_procedimento_norm"]
-
-    # Operadora -> a que realmente deve casar
-    df["chave_oper"] = df["numeroGuiaOperadora"].astype(str) + "__" + df["codigo_procedimento_norm"]
-
+    df["chave_prest"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
+    df["chave_oper"] = df["chave_prest"]
 
     # 8) Tratamento da Glosa (separar código de texto)
     if "codigo_glosa_bruto" in df.columns:
