@@ -234,46 +234,46 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
             })
             out.append(it)
 
+   
     # SADT
     for guia in root.findall('.//ans:guiaSP-SADT', ANS_NS):
         cab = guia.find('ans:cabecalhoGuia', ANS_NS)
-        aut = guia.find('ans:dadosAutorizacao', ANS_NS) # NOVO: Local da guia operadora
-        
-        # --- SITUAÇÃO 1: Busca a Guia do Prestador (Ex: 8524664) ---
+        aut = guia.find('ans:dadosAutorizacao', ANS_NS)
+
+        # 1) Guia Prestador (sempre no cabeçalho)
         numero_guia_prest = tx(guia.find('ans:numeroGuiaPrestador', ANS_NS))
         if not numero_guia_prest and cab is not None:
             numero_guia_prest = tx(cab.find('ans:numeroGuiaPrestador', ANS_NS))
 
-        # --- SITUAÇÃO 2: Busca a Guia da Operadora (Ex: 8530641) ---
+        # 2) Guia Operadora (sempre na autorização — PRIORIDADE MÁXIMA)
         numero_guia_oper = ""
         if aut is not None:
             numero_guia_oper = tx(aut.find('ans:numeroGuiaOperadora', ANS_NS))
-        
-        # Fallback: Se não achou em autorização, tenta no cabeçalho
+
+        # 3) Se não veio em dadosAutorizacao, tenta no cabeçalho
         if not numero_guia_oper and cab is not None:
             numero_guia_oper = tx(cab.find('ans:numeroGuiaOperadora', ANS_NS))
 
-        # Garante que o campo operadora não fique vazio
-        if not numero_guia_oper:
-            numero_guia_oper = numero_guia_prest
-
-        # --- Coleta de dados gerais da guia ---
+        # ❗ Nunca sobrescrever a guia operadora com a do prestador
+        # Se não existe, deixa vazio, assim a conciliação não cria chave falsa
+    
         paciente = tx(guia.find('.//ans:dadosBeneficiario/ans:nomeBeneficiario', ANS_NS))
         medico   = tx(guia.find('.//ans:dadosProfissionaisResponsaveis/ans:nomeProfissional', ANS_NS))
         data_atd = tx(guia.find('.//ans:dataAtendimento', ANS_NS))
-        
+
         for it in _itens_sadt(guia):
             it.update({
                 'arquivo': nome,
                 'numero_lote': numero_lote,
                 'tipo_guia': 'SADT',
                 'numeroGuiaPrestador': numero_guia_prest,
-                'numeroGuiaOperadora': numero_guia_oper, # Importante: envia o 8530641 para a conciliação
+                'numeroGuiaOperadora': numero_guia_oper,  # sempre o certo aqui
                 'paciente': paciente,
                 'medico': medico,
                 'data_atendimento': data_atd,
             })
             out.append(it)
+
 
     return out
 
