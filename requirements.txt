@@ -2,3 +2,10 @@ streamlit==1.40.2
 pandas==2.2.3
 openpyxl==3.1.5
 lxml
+selenium
+xlrd==2.0.1
+openpyxl
+xlsxwriter
+pdfplumber
+PyPDF2
+beautifulsoup4
