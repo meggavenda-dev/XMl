@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 # =========================================================
 # app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX) + Selenium AMHP
@@ -41,7 +42,6 @@ except Exception:
 
 # ========= FUNÇÕES DE AUTOMAÇÃO AMHP (DEFINIÇÃO GLOBAL) =========
 
-
 def configurar_driver():
     opts = Options()
     chrome_binary = os.environ.get("CHROME_BINARY", "/usr/bin/chromium")
@@ -80,121 +80,217 @@ def configurar_driver():
     return driver
 
 
-def js_safe_click(driver, by, value, timeout=30, retries=3):
-    """Executa um clique via JS com múltiplas tentativas para evitar o erro de Stacktrace."""
+def js_safe_click(driver, by, value, timeout=30, retries=3, scroll_block='center'):
+    """
+    Clique via JS com rolagem e múltiplas tentativas. Evita 'Other element would receive the click'.
+    """
     for attempt in range(retries):
         try:
             el = WebDriverWait(driver, timeout).until(
                 EC.presence_of_element_located((by, value))
             )
-            # Rola para o centro para garantir que o JS encontre o elemento
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-            time.sleep(0.5)
+            driver.execute_script(f"arguments[0].scrollIntoView({{block: '{scroll_block}'}});", el)
+            time.sleep(0.4)
             driver.execute_script("arguments[0].click();", el)
             return
-        except (TimeoutException, ElementClickInterceptedException) as e:
+        except (TimeoutException, ElementClickInterceptedException):
+            time.sleep(1.0)
             if attempt == retries - 1:
-                raise e
-            time.sleep(1.5)
+                raise
 
 
-def _entrar_amhptiss(driver, wait, wait_after=12):
-    """Aumentada a espera e melhorada a detecção de aba para o Streamlit Cloud."""
+def _entrar_amhptiss(driver, wait, wait_after=10):
+    """
+    Entra no módulo AMHPTISS/TISS com fallback case-insensitive,
+    troca para a nova aba/janela se abrir, e remove overlays.
+    """
     try:
-        # Tenta localizar o botão AMHPTISS por texto ou ID
+        # Tenta botão com texto literal
         btn_tiss = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'AMHPTISS')]")))
         driver.execute_script("arguments[0].click();", btn_tiss)
     except Exception:
-        # Fallback para qualquer elemento que mencione TISS
-        elems = driver.find_elements(By.XPATH, "//*[contains(text(), 'TISS')]")
-        if elems: driver.execute_script("arguments[0].click();", elems[0])
+        # Fallback INSENSÍVEL a maiúsculas/minúsculas
+        elems = driver.find_elements(
+            By.XPATH,
+            "//*[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TISS')]"
+        )
+        if elems:
+            driver.execute_script("arguments[0].click();", elems[0])
+        # Se nada for encontrado, pode ser que já esteja no AMHPTISS
 
     time.sleep(wait_after)
-    # Garante que mudou para a aba que abriu
+
+    # Se abriu em nova aba/janela, troca o foco
     if len(driver.window_handles) > 1:
         driver.switch_to.window(driver.window_handles[-1])
-    
-    # Limpeza de overlays que travam o clique
-    driver.execute_script("""
-        document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container').forEach(el => el.remove());
-    """)
+
+    # Remove overlays/modais que bloqueiam cliques
+    try:
+        driver.execute_script("""
+            const avisos = document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container');
+            avisos.forEach(el => el.remove());
+        """)
+    except Exception:
+        pass
+
 
 def _ir_para_atendimentos(driver, wait):
-    """Adicionado retry para o menu IrPara."""
+    """
+    A partir do AMHPTISS, abre o menu 'IrPara' -> 'Consultório' -> 'AtendimentosRealizados.aspx'
+    com clique seguro, e aguarda a grade aparecer.
+    """
     js_safe_click(driver, By.ID, "IrPara", timeout=40)
     time.sleep(1.5)
     js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
     time.sleep(1)
     js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
-    # Aguarda o carregamento inicial da página de busca
+
+    # Aguarda o carregamento inicial da página (grid presente)
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+
 
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 50) # Aumentado para 50 segundos
+    wait = WebDriverWait(driver, 50)  # aumentado para robustez
     dados = {}
     try:
+        # 1) Login
         driver.get("https://portal.amhp.com.br/")
-        # Login
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        _entrar_amhptiss(driver, wait)
+        # 2) Entrar AMHPTISS (com fallback) e limpar overlays
+        _entrar_amhptiss(driver, wait, wait_after=10)
+
+        # 3) Menu -> Atendimentos
         _ir_para_atendimentos(driver, wait)
 
-        # Busca da Guia
-        input_busca = wait.until(EC.visibility_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
+        # 4) Localiza o campo de busca (Atendimento OU Guia)
+        input_ids = [
+            "ctl00_MainContent_rtbNumeroAtendimento",  # mais comum
+            "ctl00_MainContent_rtbNumeroGuia",         # fallback
+        ]
+        input_busca = None
+        for cand in input_ids:
+            try:
+                input_busca = wait.until(EC.visibility_of_element_located((By.ID, cand)))
+                break
+            except Exception:
+                continue
+        if not input_busca:
+            raise RuntimeError("Campo de busca não localizado (Atendimento/Guia).")
+
+        valor_busca = str(numero_guia).strip()
         input_busca.clear()
-        input_busca.send_keys(str(numero_guia).strip())
-        
-        # Referência para detecção de recarregamento
-        old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
-        
+        input_busca.send_keys(valor_busca)
+
+        # 5) Guardar referência da grid antes da busca (para staleness)
+        old_table = None
+        try:
+            old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        except Exception:
+            pass
+
+        # 6) Clicar Buscar
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # Sincronização AJAX: Espera a tabela antiga sumir ou mudar
-        time.sleep(5) 
-        
-        # Clica na guia encontrada
-        xpath_guia = f"//a[contains(text(), '{str(numero_guia).strip()}')]"
-        link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
-        driver.execute_script("arguments[0].click();", link_guia)
+        # 7) Sincronização pós-busca (AJAX)
+        if old_table is not None:
+            try:
+                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
+            except Exception:
+                pass
 
-        # Coleta Final
+        # Espera loaders típicos de RadAjax/Telerik sumirem (se existirem)
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
+            )
+        except Exception:
+            pass
+
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+
+        # 8) Encontrar e clicar a guia
+        num = valor_busca
+
+        # (a) tenta pelo próprio <a> cujo texto contém o número (normalizado)
+        xpath_link = f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{num}')]"
+        try:
+            link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_link)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
+            driver.execute_script("arguments[0].click();", link_guia)
+        except TimeoutException:
+            # (b) fallback: acha a TR cuja TD contenha o número e clica no primeiro link da linha
+            row_xpath = f"//table[contains(@class,'rgMasterTable')]//tr[.//td[contains(normalize-space(.), '{num}')]]"
+            linha = wait.until(EC.presence_of_element_located((By.XPATH, row_xpath)))
+            try:
+                link_na_linha = linha.find_element(By.XPATH, ".//a")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_na_linha)
+                driver.execute_script("arguments[0].click();", link_na_linha)
+            except Exception:
+                # (c) último recurso: clicar na linha toda (se for clicável)
+                driver.execute_script("arguments[0].click();", linha)
+
+        # 9) Coleta final dos dados
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(2)
-        
+        time.sleep(1.5)  # pequeno respiro pós-render
+
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
-        
-        html_tabela = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable").get_attribute('outerHTML')
+
+        tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        html_tabela = tabela_el.get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
         return dados
 
     except Exception as e:
-        try: driver.save_screenshot("erro_timeout.png")
-        except: pass
-        return {"erro": f"Tempo esgotado ou falha no portal: {str(e)}"}
+        # Dump de evidências para depuração
+        try:
+            driver.save_screenshot("erro_conexao_portal.png")
+        except Exception:
+            pass
+        try:
+            page_html = driver.page_source
+            with open("amhp_dump.html", "w", encoding="utf-8") as f:
+                f.write(page_html)
+        except Exception:
+            pass
+        return {"erro": f"{e.__class__.__name__}: {e}"}
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
 def modal_amhptiss_site(n_guia):
     st.write(f"Conectando ao portal para a guia **{n_guia}**...")
     with st.spinner("Automação Selenium em execução..."):
         res = extrair_detalhes_site_amhp(n_guia)
-    
+
     if "erro" in res:
         st.error(f"Erro na conexão: {res['erro']}")
+        # Se existirem evidências, mostra
+        if os.path.exists("erro_conexao_portal.png"):
+            st.image("erro_conexao_portal.png", caption="Screenshot no momento do erro", use_column_width=True)
+        if os.path.exists("amhp_dump.html"):
+            with st.expander("📄 Ver HTML bruto (dump)", expanded=False):
+                try:
+                    with open("amhp_dump.html", "r", encoding="utf-8") as f:
+                        st.code(f.read()[:100000], language="html")
+                except Exception:
+                    pass
     else:
         st.subheader(f"👤 Paciente: {res['paciente']}")
         st.write(f"📅 Data do Atendimento: {res['data']}")
         st.divider()
         st.write("**Itens registrados no portal:**")
-        st.dataframe(res['itens'], use_container_width=True)    
-        
+        st.dataframe(res['itens'], use_container_width=True)
+
 # =========================================================
 # Configuração da página (UI)
 # =========================================================
@@ -710,7 +806,7 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
-    
+
     df['chave_oper'] = (
         df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
@@ -815,7 +911,7 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
-    
+
     if 'competencia' not in base.columns and 'Competência' in base.columns:
         base['competencia'] = base['Competência'].astype(str)
     elif 'competencia' not in base.columns:
@@ -975,7 +1071,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
 
-        # >>> AMHPTISS (detecta inclusive a grafia exata 'Amhptiss')
+        # >>> AMHPTISS
         "amhptiss": next((
             c for c in cols
             if str(c).strip().lower() in {
@@ -1062,9 +1158,9 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     if not by_tipo.empty:
         by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
     if not top_itens.empty:
-        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor Glosado":"Valor Glosado (R$)"})
     if not by_convenio.empty:
-        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor Glosado":"Valor Glosado (R$)"})
 
     return dict(
         kpis=dict(
