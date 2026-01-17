@@ -197,7 +197,7 @@ def wait_page_ready(driver, timeout=30):
     )
 
 # =========================================================
-# Helpers NOVOS — iframe/Telerik/AJAX
+# Helpers — iframe/Telerik/AJAX
 # =========================================================
 def switch_to_rd_iframe(driver, timeout=30):
     """Garante que estamos dentro do iframe principal (rd_tmgr) do Telerik."""
@@ -263,11 +263,63 @@ def abrir_painel_localizar(driver, wait, timeout=30):
     if not ok:
         raise TimeoutException("Painel de Localizar não abriu (nenhum campo de filtro visível).")
 
-# >>> Helper crítico (RadInput + ClientState) <<<
+# >>> Helper crítico para AMHPTISS: simular usuário (ENTER) <<<
+def force_fill_tiss_input(driver, wait, input_locator, valor: str, idle_timeout=50) -> str:
+    """
+    Preenche um RadInput (AMHPTISS) de forma compatível com o comportamento do usuário:
+    foco -> clear -> digita -> ENTER (evento crítico) -> espera AJAX concluir.
+    Retorna o value atual do input após a operação (para debug/validação visual).
+    """
+    switch_to_rd_iframe(driver)
+    wait_radajax_idle(driver, timeout=idle_timeout)
+
+    campo = wait.until(EC.element_to_be_clickable(input_locator))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo)
+    try:
+        campo.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", campo)
+
+    time.sleep(0.2)
+    try:
+        campo.send_keys(Keys.CONTROL, "a")
+        campo.send_keys(Keys.DELETE)
+    except Exception:
+        pass
+    time.sleep(0.15)
+
+    campo.send_keys(str(valor))
+    time.sleep(0.15)
+
+    # Evento crítico no AMHPTISS
+    campo.send_keys(Keys.ENTER)
+
+    time.sleep(0.3)
+    wait_radajax_idle(driver, timeout=idle_timeout)
+
+    try:
+        v = (campo.get_attribute("value") or "").strip()
+    except Exception:
+        v = ""
+
+    # Fallback: TAB/blur + aguardar AJAX
+    if v != str(valor).strip():
+        try:
+            campo.send_keys(Keys.TAB)
+            time.sleep(0.2)
+            wait_radajax_idle(driver, timeout=idle_timeout)
+            v = (campo.get_attribute("value") or "").strip()
+        except Exception:
+            pass
+
+    return v
+
+# >>> Helper legado (mantido para AMHPDF e telas permissivas) <<<
 def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_tab: bool = True) -> tuple[bool, str, str]:
     """
     Define valor em um Telerik RadInput garantindo sincronismo com o ClientState.
     Retorna (ok, value_attr, client_validationText).
+    Não usar no AMHPTISS quando o campo depender de ENTER/postback parcial.
     """
     el = wait.until(EC.visibility_of_element_located((By.ID, base_id)))
     hidden_id = f"{base_id}_ClientState"
@@ -290,10 +342,8 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         el.send_keys(Keys.TAB)
     time.sleep(0.2)
 
-    # 1ª leitura do input
     val_attr = (el.get_attribute("value") or "").strip()
 
-    # Atualiza ClientState
     client_state = {
         "enabled": True,
         "emptyMessage": "",
@@ -307,7 +357,6 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         json.dumps(client_state)
     )
 
-    # Dispara eventos no textbox
     driver.execute_script("""
         var el = document.getElementById(arguments[0]);
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -315,7 +364,6 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         el.dispatchEvent(new Event('blur', { bubbles: true }));
     """, base_id)
 
-    # API Telerik ($find)
     driver.execute_script("""
         try {
             var ctl = window.$find && window.$find(arguments[0]);
@@ -331,7 +379,6 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
     """, base_id, valor)
     time.sleep(0.25)
 
-    # 2ª leitura (validação)
     val_attr2 = (el.get_attribute("value") or "").strip()
     client_json = driver.execute_script("return document.getElementById(arguments[0]).value;", hidden_id) or ""
     try:
@@ -361,7 +408,6 @@ def _entrar_amhptiss(driver, wait, wait_after=10):
 
     time.sleep(wait_after)
 
-    # Troca de janela/aba
     try:
         handles = driver.window_handles
         if len(handles) > 1:
@@ -369,7 +415,6 @@ def _entrar_amhptiss(driver, wait, wait_after=10):
     except Exception:
         pass
 
-    # Espera carregamento e remove overlays
     try:
         wait_page_ready(driver, timeout=40)
     except Exception:
@@ -397,7 +442,6 @@ def _ir_para_atendimentos(driver, wait):
     time.sleep(0.8)
     js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
-    # Aguarda grid inicial
     try:
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
     except Exception:
@@ -429,7 +473,6 @@ def extrair_detalhes_site_amhp(numero_guia):
             WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
         except Exception:
             try:
-                # >>> ajuste a URL se seu host/rota for diferente <<<
                 driver.switch_to.default_content()
                 driver.get("https://tiss.amhp.com.br/Consultorio/AtendimentosRealizados.aspx")
                 wait_page_ready(driver, timeout=40)
@@ -469,7 +512,7 @@ def extrair_detalhes_site_amhp(numero_guia):
             except Exception:
                 pass
 
-        # Último recurso: input após rótulos “Guia/Atendimento”
+        # Último recurso: input após rótulos “Guia/Atendimento/AMHPTISS”
         if not campo_id:
             try:
                 el = driver.find_element(
@@ -481,34 +524,26 @@ def extrair_detalhes_site_amhp(numero_guia):
                 pass
 
         if not campo_id:
-            # Evidências e erro
             driver.switch_to.default_content()
             driver.save_screenshot("debug_no_input.png")
             dump_iframes(driver, out_path="iframes_dump_no_input.txt")
             raise RuntimeError("Campo de busca não localizado após abrir Localizar. Veja debug_no_input.png e iframes_dump_no_input.txt.")
 
-        # 5) PREENCHIMENTO RADINPUT + CLIENTSTATE
-        ok_set, val_attr2, client_validation = set_radinput_with_clientstate(
-            driver, wait, campo_id, valor_solicitado, press_tab=True
+        # 5) PREENCHIMENTO *simulado de usuário* (ENTER é crítico no AMHPTISS)
+        valor_no_campo = force_fill_tiss_input(
+            driver,
+            wait,
+            (By.ID, campo_id),
+            valor_solicitado,
+            idle_timeout=50
         )
-        valor_no_campo = val_attr2
-        client_validationText_dbg = client_validation
-
-        if not ok_set:
-            raise RuntimeError(
-                f"RadInput não aceitou o valor solicitado. value='{val_attr2}', ClientState.validationText='{client_validation}'"
-            )
+        client_validationText_dbg = "(não usado no AMHPTISS)"
 
         # 6) Buscar (permanecendo no iframe e aguardando AJAX)
         btn_buscar_id = "ctl00_MainContent_btnBuscar_input"
-        try:
-            btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
-        except Exception:
-            driver.switch_to.default_content()
-            switch_to_rd_iframe(driver)
-            btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
+        switch_to_rd_iframe(driver)
+        btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
 
-        # Guarda a tabela antiga, se existir
         try:
             old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         except Exception:
@@ -517,7 +552,6 @@ def extrair_detalhes_site_amhp(numero_guia):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # Espera staleness e AJAX finalizar
         if old_table is not None:
             try:
                 WebDriverWait(driver, 40).until(EC.staleness_of(old_table))
@@ -530,14 +564,14 @@ def extrair_detalhes_site_amhp(numero_guia):
         switch_to_rd_iframe(driver)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
-        # 8) Abrir a guia no resultado (clicando no link que contém o número)
+        # 7) Abrir a guia no resultado (clicando no link que contém o número)
         link_guia = wait.until(EC.element_to_be_clickable((
             By.XPATH, f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{valor_solicitado}')]"
         )))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
         driver.execute_script("arguments[0].click();", link_guia)
 
-        # 9) Coleta de detalhes
+        # 8) Coleta de detalhes
         driver.switch_to.default_content()
         _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=12)
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
@@ -1225,7 +1259,7 @@ def conciliar_itens(
 # -----------------------------
 # Analytics
 # -----------------------------
-def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
+def kpis_por_competencia(df_conc: pd.DataFrame) -> pdDataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
@@ -2116,7 +2150,7 @@ with tab_glosas:
             if has_pagto:
                 base_m = df_view[df_view["_is_glosa"] == True].copy()
                 if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as index=False)
                                       .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
                                            Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
                 else:
