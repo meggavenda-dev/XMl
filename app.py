@@ -60,20 +60,7 @@ def js_safe_click(driver, by, value, timeout=25):
     driver.execute_script("arguments[0].scrollIntoView(true);", el)
     driver.execute_script("arguments[0].click();", el)
 
-Guilherme, entendi perfeitamente. O erro que você estava enfrentando (aquele stacktrace longo) geralmente indica que o Selenium perdeu a referência do elemento ou que o site tentou atualizar o DOM via JavaScript enquanto o Python tentava ler.
 
-Como você agora tem dois códigos — o seu original de conciliação e esse novo de exportação de PDF — eu consolidei a melhor lógica de ambos.
-
-O que foi corrigido:
-Implementação de js_safe_click: Substituí o clique padrão pelo clique via motor JavaScript, que é imune a elementos "invisíveis" ou modais na frente.
-
-Sincronização de Busca: Adicionei uma espera explícita após o clique no botão "Buscar". O sistema agora aguarda o link da guia aparecer na tabela antes de tentar clicar nele.
-
-Tratamento de Depreciação: Usei io.StringIO para ler o HTML da tabela, evitando avisos futuros do Pandas.
-
-Substitua a sua função extrair_detalhes_site_amhp (que está por volta da linha 64 no seu código original) por esta versão atualizada:
-
-Python
 def extrair_detalhes_site_amhp(numero_guia):
     """
     Extrai detalhes de uma guia específica no portal AMHP utilizando
