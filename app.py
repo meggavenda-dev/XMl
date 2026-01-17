@@ -541,8 +541,12 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
-    df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype str).str.strip() \
-                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
+    
+    df['chave_oper'] = (
+        df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
+        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
+    )
+
     return df
 
 # helper para padronizar nomes do "lado XML" após merges com sufixos
@@ -642,8 +646,9 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
+    
     if 'competencia' not in base.columns and 'Competência' in base.columns:
-        base['competencia'] = base['Competência'].astype str
+        base['competencia'] = base['Competência'].astype(str)
     elif 'competencia' not in base.columns:
         base['competencia'] = ""
     grp = (base.groupby('competencia', dropna=False, as_index=False)
