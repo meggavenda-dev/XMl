@@ -1,6 +1,6 @@
-
+# -*- coding: utf-8 -*-
 # =========================================================
-# app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX)
+# app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX) + Selenium AMHP
 # =========================================================
 from __future__ import annotations
 
@@ -8,19 +8,19 @@ import io
 import os
 import re
 import json
+import time
+import shutil
+import xml.etree.ElementTree as ET
+import unicodedata
 from pathlib import Path
 from typing import List, Dict, Optional, Union, IO, Tuple
 from decimal import Decimal
 from datetime import datetime
-import xml.etree.ElementTree as ET
-import unicodedata
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 
-import time
-import shutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -39,9 +39,6 @@ try:
 except Exception:
     pass
 
-# # (Opcional) Limpar cache após atualização de código (execute 1x e comente):
-# try: st.cache_data.clear()
-# except: pass
 # ========= FUNÇÕES DE AUTOMAÇÃO AMHP =========
 
 def configurar_driver():
@@ -72,15 +69,19 @@ def extrair_detalhes_site_amhp(numero_guia):
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
+        
+        # Espera carregar e lida com janelas
         time.sleep(5)
         if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
 
-        # 2. Navegação
-        driver.execute_script("document.getElementById('IrPara').click();")
+        # 2. Navegação (CORRIGIDO: Espera o botão ser clicável para evitar erro de JS null)
+        btn_ir_para = wait.until(EC.element_to_be_clickable((By.ID, "IrPara")))
+        btn_ir_para.click()
+        
         js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
         js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
-        # 3. Pesquisa (Campo que você mapeou)
+        # 3. Pesquisa
         input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
         input_busca.clear()
         input_busca.send_keys(numero_guia)
@@ -97,8 +98,6 @@ def extrair_detalhes_site_amhp(numero_guia):
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         df_itens = pd.read_html(io.StringIO(tabela_el.get_attribute('outerHTML')))[0]
         
-        # Limpeza para Código, Descrição, Valor
-        # (Adapte os nomes das colunas conforme aparecem no seu site)
         dados['itens'] = df_itens
         return dados
     except Exception as e:
@@ -108,21 +107,23 @@ def extrair_detalhes_site_amhp(numero_guia):
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
 def modal_amhptiss_site(n_guia):
-    st.write(f"Pesquisando dados da guia **{n_guia}** no site...")
-    res = extrair_detalhes_site_amhp(n_guia)
+    st.write(f"Conectando ao portal para a guia **{n_guia}**...")
+    with st.spinner("Automação Selenium em execução..."):
+        res = extrair_detalhes_site_amhp(n_guia)
+    
     if "erro" in res:
         st.error(f"Erro na conexão: {res['erro']}")
     else:
-        st.subheader(f"Paciente: {res['paciente']}")
-        st.write(f"Data: {res['data']}")
+        st.subheader(f"👤 Paciente: {res['paciente']}")
+        st.write(f"📅 Data do Atendimento: {res['data']}")
+        st.divider()
+        st.write("**Itens registrados no portal:**")
         st.dataframe(res['itens'], use_container_width=True)
+        
 # =========================================================
 # Configuração da página (UI)
 # =========================================================
-st.set_page_config(
-    page_title="TISS • Conciliação & Analytics (Auditoria desativada)",
-    layout="wide"
-)
+st.set_page_config(page_title="TISS • Conciliação & Analytics", layout="wide")
 st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Analytics")
 st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado (AMHP), gera rankings e analytics — sem editor de XML. Auditoria mantida no código, porém desativada.")
 
@@ -1453,29 +1454,41 @@ with tab_glosas:
 
             # Ações por linha (botões)
             for i, row in df_items_top.reset_index(drop=True).iterrows():
-                col_desc, col_val, col_btn = st.columns([0.65, 0.20, 0.15])
+                col_desc, col_val, col_btn = st.columns([0.55, 0.15, 0.30])
+                item_nome = row.get('Descrição do Item', '')
+                
                 with col_desc:
-                    st.write(f"**{row.get('Descrição do Item', '')}**")
+                    st.write(f"**{item_nome}**")
                 with col_val:
-                    try:
-                        st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
-                    except Exception:
-                        st.write("-")
+                    try: st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
+                    except: st.write("-")
+                
                 with col_btn:
-                    # Botão original para ver guias no Excel
-                    if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
-                        st.session_state["glosas_item_modal"] = str(row.get("Descrição do Item", ""))
-                        st.rerun()
+                    c_det, c_site = st.columns(2)
                     
-                    # NOVO: Botão para pesquisar a guia no site
-                    # Pegamos a primeira guia AMHPTISS da lista para este item
-                    item_nome = row.get("Descrição do Item", "")
-                    # Busca o número da guia no dataframe filtrado
-                    df_guia_temp = df_view[df_view[colmap["descricao"]] == item_nome]
-                    guia_para_site = str(df_guia_temp[colmap["amhptiss"]].iloc[0]).strip()
+                    with c_det:
+                        if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
+                            st.session_state["glosas_item_modal"] = str(item_nome)
+                            st.rerun()
                     
-                    if st.button("🌐 No Site", key=f"site_{i}"):
-                        modal_amhptiss_site(guia_para_site)
+                    with c_site:
+                        # 1. Filtramos as guias que pertencem a este item específico
+                        df_guia_temp = df_view[df_view[colmap["descricao"]] == item_nome]
+                        lista_guias = df_guia_temp[colmap["amhptiss"]].dropna().unique().tolist()
+                        
+                        if lista_guias:
+                            # 2. Criamos um seletor compacto para o usuário escolher qual guia pesquisar
+                            guia_escolhida = st.selectbox(
+                                "Escolha a guia:", 
+                                lista_guias, 
+                                key=f"sel_guia_{i}",
+                                label_visibility="collapsed"
+                            )
+                            # 3. Botão que dispara a pesquisa da guia selecionada
+                            if st.button("🌐 Pesquisar", key=f"btn_site_{i}"):
+                                modal_amhptiss_site(str(guia_escolhida).strip())
+                        else:
+                            st.caption("Sem guia AMHP")
 
             # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
             def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
