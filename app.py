@@ -1157,8 +1157,10 @@ with tab_conc:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+
 # =========================================================
-# ABA 2 — Faturas Glosadas (XLSX) — com session_state (sem “Situação de recurso” e sem “Analista”)
+# ABA 2 — Faturas Glosadas (XLSX) — com session_state
+# (Sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
@@ -1295,131 +1297,136 @@ with tab_glosas:
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # KPIs e análises (pós-filtro)
+        # KPIs e análises (pós-filtro) — REMOVIDA a “Visão geral (após filtros)”
+
+        # Top motivos
+        st.markdown("### 🥇 Top motivos de glosa (por valor)")
         analytics = build_glosas_analytics(df_view, colmap)
-        if not analytics:
-            st.warning("Arquivos lidos, mas não foi possível identificar colunas mínimas.")
+        if not analytics or analytics["top_motivos"].empty:
+            st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
         else:
-            k = analytics["kpis"]
+            mot = analytics["top_motivos"].head(20)
+            st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+            try:
+                chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
+            except Exception:
+                pass
 
-            st.markdown("### 🔎 Visão geral (após filtros)")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Registros", f"{k['linhas']:,}".replace(",", "."))
-            periodo_txt = ""
-            if k["periodo_ini"] is not None and k["periodo_fim"] is not None:
-                periodo_txt = f"{k['periodo_ini']:%d/%m/%Y} → {k['periodo_fim']:%d/%m/%Y}"
-            c2.metric("Período (Realizado)", periodo_txt or "—")
-            c3.metric("Convênios", f"{k['convenios']}")
-            c4.metric("Prestadores", f"{k['prestadores']}")
+        # Tipo de glosa
+        st.markdown("### 🧷 Tipo de glosa")
+        by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
+        if by_tipo.empty:
+            st.info("Coluna de 'Tipo de Glosa' não encontrada.")
+        else:
+            st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
-            st.markdown("### 🥇 Top motivos de glosa (por valor)")
-            mot = analytics["top_motivos"].head(20) if not analytics["top_motivos"].empty else pd.DataFrame()
-            if mot.empty:
-                st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
-            else:
-                st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-                try:
-                    chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                    st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
-                except Exception:
-                    pass
+        # Itens com maior valor glosado
+        st.markdown("### 🧩 Itens/descrições com maior valor glosado")
+        top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
+        if top_itens.empty:
+            st.info("Coluna de 'Descrição' não encontrada.")
+        else:
+            st.dataframe(apply_currency(top_itens.head(20), ["Valor Glosado (R$)"]), use_container_width=True, height=360)
 
-            st.markdown("### 🧷 Tipo de glosa")
-            by_tipo = analytics["by_tipo"]
-            if by_tipo.empty:
-                st.info("Coluna de 'Tipo de Glosa' não encontrada.")
-            else:
-                st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+        # Convênios com maior valor glosado
+        st.markdown("### 🏥 Convênios com maior valor glosado")
+        by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
+        if by_conv.empty:
+            st.info("Coluna de 'Convênio' não encontrada.")
+        else:
+            by_conv_top = by_conv.head(20)
+            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+            try:
+                chart_conv = by_conv_top.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
+            except Exception:
+                pass
 
-            st.markdown("### 🧩 Itens/descrições com maior valor glosado")
-            top_itens = analytics["top_itens"].head(20)
-            if top_itens.empty:
-                st.info("Coluna de 'Descrição' não encontrada.")
-            else:
-                st.dataframe(apply_currency(top_itens, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-
-            st.markdown("### 🏥 Convênios com maior valor glosado")
-            by_conv = analytics["by_convenio"].head(20)
-            if by_conv.empty:
-                st.info("Coluna de 'Convênio' não encontrada.")
-            else:
-                st.dataframe(apply_currency(by_conv, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-                try:
-                    chart_conv = by_conv.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                    st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
-                except Exception:
-                    pass
-
-            # Exportação (sem "Situação de recurso" e sem "Analista")
-            st.markdown("---")
-            st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
-            from io import BytesIO
-            buf = BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as wr:
-                kpi_df = pd.DataFrame([{
-                    "Convênio (filtro)": conv_sel,
-                    "Modo Período": modo_periodo,
-                    "Mês (se aplicado)": mes_sel_label or "",
-                    "Registros": k["linhas"],
-                    "Período Início": k["periodo_ini"].strftime("%d/%m/%Y") if k["periodo_ini"] else "",
-                    "Período Fim": k["periodo_fim"].strftime("%d/%m/%Y") if k["periodo_fim"] else "",
-                    "Convênios": k["convenios"],
-                    "Prestadores": k["prestadores"],
-                    "Valor Cobrado (R$)": round(k["valor_cobrado"], 2),
-                    "Valor Glosado (R$)": round(k["valor_glosado"], 2),
-                    "Taxa de Glosa (%)": round(k["taxa_glosa"]*100, 2),
-                }])
-                kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
-
-                if has_pagto:
-                    base_m = df_view[df_view["_is_glosa"] == True].copy()
-                    if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                        mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                          .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                               Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
-                    else:
-                        mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                          .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                               Valor_Cobrado=("_valor_glosa_abs","size")))
-                    mensal = mensal.sort_values("_pagto_ym")
-                    mensal.rename(columns={"_pagto_ym":"YYYY-MM","_pagto_mes_br":"Mês/Ano"}, inplace=True)
-                    mensal.to_excel(wr, index=False, sheet_name="Mensal_Pagamento")
-
-                if not analytics["top_motivos"].empty: analytics["top_motivos"].to_excel(wr, index=False, sheet_name="Top_Motivos")
-                if not analytics["by_tipo"].empty: analytics["by_tipo"].to_excel(wr, index=False, sheet_name="Tipo_Glosa")
-                if not analytics["top_itens"].empty: analytics["top_itens"].to_excel(wr, index=False, sheet_name="Top_Itens")
-                if not analytics["by_convenio"].empty: analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
-
-                col_export = [c for c in [
-                    colmap.get("data_pagamento"),
-                    colmap.get("data_realizado"),
-                    colmap.get("convenio"), colmap.get("prestador"),
-                    colmap.get("descricao"), colmap.get("tipo_glosa"),
-                    colmap.get("motivo"), colmap.get("desc_motivo"),
-                    colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
-                ] if c and c in df_view.columns]
-                raw = df_view[col_export].copy() if col_export else pd.DataFrame()
-                if not raw.empty:
-                    raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
-
-                # Ajustes visuais
-                for name in wr.sheets:
-                    ws = wr.sheets[name]
-                    ws.freeze_panes = "A2"
-                    for col in ws.columns:
-                        try:
-                            col_letter = col[0].column_letter
-                        except Exception:
-                            continue
-                        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-                        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
-
-            st.download_button(
-                "⬇️ Baixar análise (XLSX)",
-                data=buf.getvalue(),
-                file_name="analise_faturas_glosadas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        # Exportação (sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
+        st.markdown("---")
+        st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
+        from io import BytesIO
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as wr:
+            # Apenas metadados mínimos do filtro na aba KPIs
+            k = analytics["kpis"] if analytics else dict(
+                linhas=len(df_view), periodo_ini=None, periodo_fim=None,
+                convenios=df_view[colmap["convenio"]].nunique() if colmap.get("convenio") in df_view.columns else 0,
+                prestadores=df_view[colmap["prestador"]].nunique() if colmap.get("prestador") in df_view.columns else 0,
+                valor_cobrado=float(df_view[colmap["valor_cobrado"]].sum()) if colmap.get("valor_cobrado") in df_view.columns else 0.0,
+                valor_glosado=float(df_view["_valor_glosa_abs"].sum()) if "_valor_glosa_abs" in df_view.columns else 0.0,
+                taxa_glosa=0.0
             )
+            kpi_df = pd.DataFrame([{
+                "Convênio (filtro)": conv_sel,
+                "Modo Período": modo_periodo,
+                "Mês (se aplicado)": mes_sel_label or "",
+                "Registros": k.get("linhas", ""),
+                "Período Início": k.get("periodo_ini").strftime("%d/%m/%Y") if k.get("periodo_ini") else "",
+                "Período Fim": k.get("periodo_fim").strftime("%d/%m/%Y") if k.get("periodo_fim") else "",
+                "Convênios": k.get("convenios", ""),
+                "Prestadores": k.get("prestadores", ""),
+                "Valor Cobrado (R$)": round(k.get("valor_cobrado", 0.0), 2),
+                "Valor Glosado (R$)": round(k.get("valor_glosado", 0.0), 2),
+                "Taxa de Glosa (%)": round(k.get("taxa_glosa", 0.0) * 100, 2),
+            }])
+            kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
+
+            if has_pagto:
+                base_m = df_view[df_view["_is_glosa"] == True].copy()
+                if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                           Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
+                else:
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                           Valor_Cobrado=("_valor_glosa_abs","size")))
+                mensal = mensal.sort_values("_pagto_ym")
+                mensal.rename(columns={"_pagto_ym":"YYYY-MM","_pagto_mes_br":"Mês/Ano"}, inplace=True)
+                mensal.to_excel(wr, index=False, sheet_name="Mensal_Pagamento")
+
+            if analytics and not analytics["top_motivos"].empty:
+                analytics["top_motivos"].to_excel(wr, index=False, sheet_name="Top_Motivos")
+            if analytics and not analytics["by_tipo"].empty:
+                analytics["by_tipo"].to_excel(wr, index=False, sheet_name="Tipo_Glosa")
+            if analytics and not analytics["top_itens"].empty:
+                analytics["top_itens"].to_excel(wr, index=False, sheet_name="Top_Itens")
+            if analytics and not analytics["by_convenio"].empty:
+                analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
+
+            col_export = [c for c in [
+                colmap.get("data_pagamento"),
+                colmap.get("data_realizado"),
+                colmap.get("convenio"), colmap.get("prestador"),
+                colmap.get("descricao"), colmap.get("tipo_glosa"),
+                colmap.get("motivo"), colmap.get("desc_motivo"),
+                colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
+            ] if c and c in df_view.columns]
+            raw = df_view[col_export].copy() if col_export else pd.DataFrame()
+            if not raw.empty:
+                raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
+
+            # Ajustes visuais
+            for name in wr.sheets:
+                ws = wr.sheets[name]
+                ws.freeze_panes = "A2"
+                for col in ws.columns:
+                    try:
+                        col_letter = col[0].column_letter
+                    except Exception:
+                        continue
+                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+        st.download_button(
+            "⬇️ Baixar análise (XLSX)",
+            data=buf.getvalue(),
+            file_name="analise_faturas_glosadas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
+
