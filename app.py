@@ -587,7 +587,7 @@ def conciliar_itens(
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
+    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""],], ignore_index=True)
 
     # 3ª opcional: descrição + valor (tolerância)
     fallback_matches = pd.DataFrame()
@@ -1160,7 +1160,7 @@ with tab_conc:
 # =========================================================
 # ABA 2 — Faturas Glosadas (XLSX) — com session_state
 # (Sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
-# + Itens interativos com modal de guias
+# + Itens interativos com modal/expander (compatibilidade)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
@@ -1172,7 +1172,7 @@ with tab_glosas:
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
-        st.session_state.glosas_item_modal = None  # item selecionado para modal
+        st.session_state.glosas_item_modal = None  # item selecionado para detalhe
 
     glosas_files = st.file_uploader(
         "Relatórios de Faturas Glosadas (.xlsx):",
@@ -1359,58 +1359,74 @@ with tab_glosas:
                         st.session_state["glosas_item_modal"] = str(row.get("Descrição do Item", ""))
                         st.rerun()
 
-            # Modal de detalhe por Item
+            # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
+            def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
+                """Renderiza o detalhe do item selecionado (dentro do contexto atual)."""
+                dcol = colmap.get("descricao")
+                if not dcol or dcol not in df_view.columns:
+                    st.warning("Não foi possível localizar a coluna de descrição no dataset.")
+                    if st.button("Fechar", key="close_item_modal_err"):
+                        st.session_state["glosas_item_modal"] = None
+                        st.rerun()
+                    return
+
+                df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
+                if df_item.empty:
+                    st.info("Nenhuma linha encontrada para este item no recorte atual.")
+                else:
+                    # Colunas úteis (somente as que existirem)
+                    possiveis = [
+                        colmap.get("convenio"), colmap.get("prestador"),
+                        colmap.get("data_pagamento"), colmap.get("data_realizado"),
+                        colmap.get("motivo"), colmap.get("desc_motivo"),
+                        colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado"),
+                    ]
+                    show_cols = [c for c in possiveis if c and c in df_item.columns]
+
+                    total_reg = len(df_item)
+                    total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
+                    st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
+
+                    if show_cols:
+                        st.dataframe(
+                            apply_currency(
+                                df_item[show_cols],
+                                [
+                                    colmap.get("valor_cobrado") or "",
+                                    colmap.get("valor_glosa") or "",
+                                    colmap.get("valor_recursado") or "",
+                                ],
+                            ),
+                            use_container_width=True,
+                            height=420,
+                        )
+                    else:
+                        st.dataframe(df_item, use_container_width=True, height=420)
+
+                    # Download do recorte
+                    base_cols = show_cols if show_cols else df_item.columns.tolist()
+                    st.download_button(
+                        "⬇️ Baixar relação (CSV)",
+                        data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                        file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}.csv",
+                        mime="text/csv",
+                    )
+
+                if st.button("Fechar", key="close_item_modal_ok"):
+                    st.session_state["glosas_item_modal"] = None
+                    st.rerun()
+
+            # Abre modal se disponível; senão, usa expander
             item_escolhido = st.session_state.get("glosas_item_modal")
             if item_escolhido:
-                with st.modal(f"Guias/linhas que contêm o item: {item_escolhido}"):
-                    dcol = colmap.get("descricao")
-                    if not dcol or dcol not in df_view.columns:
-                        st.warning("Não foi possível localizar a coluna de descrição no dataset.")
-                        if st.button("Fechar", key="close_item_modal_err"):
-                            st.session_state["glosas_item_modal"] = None
-                            st.rerun()
-                    else:
-                        df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
-                        if df_item.empty:
-                            st.info("Nenhuma linha encontrada para este item no recorte atual.")
-                        else:
-                            # Colunas úteis (apenas as que existirem)
-                            possiveis = [
-                                colmap.get("convenio"), colmap.get("prestador"),
-                                colmap.get("data_pagamento"), colmap.get("data_realizado"),
-                                colmap.get("motivo"), colmap.get("desc_motivo"),
-                                colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado"),
-                            ]
-                            show_cols = [c for c in possiveis if c and c in df_item.columns]
-
-                            total_reg = len(df_item)
-                            total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-                            st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
-
-                            if show_cols:
-                                st.dataframe(
-                                    apply_currency(df_item[show_cols], [
-                                        colmap.get("valor_cobrado") or "",
-                                        colmap.get("valor_glosa") or "",
-                                        colmap.get("valor_recursado") or ""
-                                    ]),
-                                    use_container_width=True, height=420
-                                )
-                            else:
-                                st.dataframe(df_item, use_container_width=True, height=420)
-
-                            # Download do recorte
-                            base_cols = show_cols if show_cols else df_item.columns.tolist()
-                            st.download_button(
-                                "⬇️ Baixar relação (CSV)",
-                                data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
-                                file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}.csv",
-                                mime="text/csv"
-                            )
-
-                        if st.button("Fechar", key="close_item_modal_ok"):
-                            st.session_state["glosas_item_modal"] = None
-                            st.rerun()
+                _title = f"Guias/linhas que contêm o item: {item_escolhido}"
+                if hasattr(st, "modal"):
+                    with st.modal(_title):
+                        _render_item_detail(df_view, colmap, item_escolhido)
+                else:
+                    with st.expander(_title, expanded=True):
+                        st.info("Sua versão do Streamlit não possui `st.modal`. Exibindo em um painel expansível.")
+                        _render_item_detail(df_view, colmap, item_escolhido)
 
         # ---------- Convênios com maior valor glosado ----------
         st.markdown("### 🏥 Convênios com maior valor glosado")
