@@ -841,12 +841,321 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
     # ... lógica mantida, porém a função não é utilizada (desativada)
     return agg
 
+
+# =========================
+# HELPERS — Leitor de Faturas Glosadas (XLSX)
+# =========================
+import numpy as np
+
+def _pick_col(df: pd.DataFrame, *candidates):
+    """Retorna o primeiro nome de coluna que existir no DF dentre os candidatos."""
+    for cand in candidates:
+        for c in df.columns:
+            if str(c).strip().lower() == str(cand).strip().lower():
+                return c
+            # fuzzy: contém as palavras
+            lc = str(c).lower()
+            if isinstance(cand, str) and all(w in lc for w in cand.lower().split()):
+                return c
+    return None
+
+@st.cache_data(show_spinner=False)
+def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
+    """
+    Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP ou similar),
+    concatena e retorna (df, colmap) com mapeamento de colunas.
+    """
+    if not files:
+        return pd.DataFrame(), {}
+
+    parts = []
+    for f in files:
+        df = pd.read_excel(f, engine="openpyxl")
+        df.columns = [str(c).strip() for c in df.columns]
+        parts.append(df)
+
+    df = pd.concat(parts, ignore_index=True)
+    cols = df.columns
+
+    # Mapeamento flexível das colunas principais
+    colmap = {
+        "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
+        "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
+        "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
+        "data_realizado": next((c for c in cols if "Realizado" in str(c)), None),
+        "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
+        "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
+        "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
+        "analista": next((c for c in cols if "Analista Atual" in str(c)), None),
+        "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
+        "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
+        "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
+        "mantida": next((c for c in cols if "Mantida" in str(c)), None),
+        "recupera": next((c for c in cols if "Recupera" in str(c)), None),
+    }
+
+    # Conversões
+    for c in [colmap["valor_cobrado"], colmap["valor_glosa"], colmap["valor_recursado"]]:
+        if c and c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if colmap["data_realizado"] and colmap["data_realizado"] in df.columns:
+        df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
+
+    # Flags
+    if colmap["valor_glosa"] in df.columns:
+        df["_is_glosa"] = df[colmap["valor_glosa"]] < 0
+        df["_valor_glosa_abs"] = df[colmap["valor_glosa"]].abs()
+    else:
+        df["_is_glosa"] = False
+        df["_valor_glosa_abs"] = 0.0
+
+    return df, colmap
+
+
+def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
+    """
+    Calcula os KPIs e agrupamentos necessários para a aba independente.
+    Retorna um dicionário com dataframes/valores prontos para exibição.
+    """
+    if df.empty or not colmap:
+        return {}
+
+    cm = colmap
+    m = df["_is_glosa"].fillna(False)
+
+    # --- KPIs principais ---
+    total_linhas = len(df)
+    periodo_ini = df[cm["data_realizado"]].min() if cm["data_realizado"] in df.columns else None
+    periodo_fim = df[cm["data_realizado"]].max() if cm["data_realizado"] in df.columns else None
+    valor_cobrado = float(df[cm["valor_cobrado"]].fillna(0).sum()) if cm["valor_cobrado"] in df.columns else 0.0
+    valor_glosado = float(df.loc[m, "_valor_glosa_abs"].sum())
+    taxa_glosa = (valor_glosado / valor_cobrado) if valor_cobrado else 0.0
+    convenios = int(df[cm["convenio"]].nunique()) if cm["convenio"] in df.columns else 0
+    prestadores = int(df[cm["prestador"]].nunique()) if cm["prestador"] in df.columns else 0
+
+    mantida_counts = (df[cm["mantida"]].value_counts(dropna=False).rename_axis("mantida").reset_index(name="itens")
+                      if cm["mantida"] in df.columns else pd.DataFrame(columns=["mantida","itens"]))
+    recupera_counts = (df[cm["recupera"]].value_counts(dropna=False).rename_axis("recupera").reset_index(name="itens")
+                       if cm["recupera"] in df.columns else pd.DataFrame(columns=["recupera","itens"]))
+
+    # --- Agrupamentos (apenas linhas glosadas) ---
+    base = df.loc[m].copy()
+
+    def _agg(df_, keys):
+        if df_.empty:
+            return df_
+        out = (df_.groupby(keys, dropna=False, as_index=False)
+                 .agg(Qtd=(" _is_glosa", "size") if " _is_glosa" in df_.columns else ("_is_glosa","size"),
+                      Valor_Glosado=(" _valor_glosa_abs", "sum") if " _valor_glosa_abs" in df_.columns else ("_valor_glosa_abs","sum")))
+        # renomeia se agrupou com nomes com espaço (caso copying)
+        if " _is_glosa" in out.columns: out = out.rename(columns={" _is_glosa":"Qtd"})
+        if " _valor_glosa_abs" in out.columns: out = out.rename(columns={" _valor_glosa_abs":"Valor_Glosado"})
+        out = out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
+        return out
+
+    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm["motivo"] and cm["desc_motivo"] else pd.DataFrame()
+    by_tipo = _agg(base, [cm["tipo_glosa"]]) if cm["tipo_glosa"] else pd.DataFrame()
+    by_analista = _agg(base, [cm["analista"]]) if cm["analista"] else pd.DataFrame()
+    top_itens = _agg(base, [cm["descricao"]]) if cm["descricao"] else pd.DataFrame()
+    by_convenio = _agg(base, [cm["convenio"]]) if cm["convenio"] else pd.DataFrame()
+
+    # Ajustes de nomes para exibição
+    if not top_motivos.empty:
+        top_motivos = top_motivos.rename(columns={
+            cm["motivo"]: "Motivo",
+            cm["desc_motivo"]: "Descrição do Motivo",
+            "Valor_Glosado": "Valor Glosado (R$)"
+        })
+    if not by_tipo.empty:
+        by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not by_analista.empty:
+        by_analista = by_analista.rename(columns={cm["analista"]: "Analista Atual", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not top_itens.empty:
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not by_convenio.empty:
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
+
+    return dict(
+        kpis=dict(
+            linhas=total_linhas,
+            periodo_ini=periodo_ini,
+            periodo_fim=periodo_fim,
+            convenios=convenios,
+            prestadores=prestadores,
+            valor_cobrado=valor_cobrado,
+            valor_glosado=valor_glosado,
+            taxa_glosa=taxa_glosa,
+            mantida=mantida_counts,
+            recupera=recupera_counts
+        ),
+        top_motivos=top_motivos,
+        by_tipo=by_tipo,
+        by_analista=by_analista,
+        top_itens=top_itens,
+        by_convenio=by_convenio
+    )
+
+
+
 # =========================================================
 # PARTE 6 — Interface (Uploads, Parâmetros, Processamento, Analytics, Export)
 # =========================================================
+# >>> Esta versão adiciona duas abas: "Conciliação TISS" e "Faturas Glosadas (XLSX)"
+# >>> Mantém todo o seu fluxo original na aba de Conciliação
+# >>> e inclui uma aba independente para relatórios de glosa em Excel.
 
 # -----------------------------
-# Sidebar de parâmetros
+# Helpers exclusivos da aba "Faturas Glosadas (XLSX)"
+# -----------------------------
+def _pick_col(df: pd.DataFrame, *candidates):
+    """Retorna o primeiro nome de coluna que existir no DF dentre os candidatos."""
+    for cand in candidates:
+        for c in df.columns:
+            if str(c).strip().lower() == str(cand).strip().lower():
+                return c
+            # fuzzy: contém todas as palavras do candidato
+            lc = str(c).lower()
+            if isinstance(cand, str) and all(w in lc for w in cand.lower().split()):
+                return c
+    return None
+
+@st.cache_data(show_spinner=False)
+def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
+    """
+    Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP ou similar),
+    concatena e retorna (df, colmap) com mapeamento de colunas.
+    """
+    if not files:
+        return pd.DataFrame(), {}
+
+    parts = []
+    for f in files:
+        df = pd.read_excel(f, engine="openpyxl")
+        df.columns = [str(c).strip() for c in df.columns]
+        parts.append(df)
+
+    df = pd.concat(parts, ignore_index=True)
+    cols = df.columns
+
+    # Mapeamento flexível das colunas principais
+    colmap = {
+        "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
+        "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
+        "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
+        "data_realizado": next((c for c in cols if "Realizado" in str(c)), None),
+        "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
+        "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
+        "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
+        "analista": next((c for c in cols if "Analista Atual" in str(c)), None),
+        "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
+        "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
+        "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
+        "mantida": next((c for c in cols if "Mantida" in str(c)), None),
+        "recupera": next((c for c in cols if "Recupera" in str(c)), None),
+    }
+
+    # Conversões
+    for c in [colmap["valor_cobrado"], colmap["valor_glosa"], colmap["valor_recursado"]]:
+        if c and c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if colmap["data_realizado"] and colmap["data_realizado"] in df.columns:
+        df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
+
+    # Flags
+    if colmap["valor_glosa"] in df.columns:
+        df["_is_glosa"] = df[colmap["valor_glosa"]] < 0
+        df["_valor_glosa_abs"] = df[colmap["valor_glosa"]].abs()
+    else:
+        df["_is_glosa"] = False
+        df["_valor_glosa_abs"] = 0.0
+
+    return df, colmap
+
+
+def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
+    """
+    Calcula os KPIs e agrupamentos necessários para a aba independente.
+    Retorna um dicionário com dataframes/valores prontos para exibição.
+    """
+    if df.empty or not colmap:
+        return {}
+
+    cm = colmap
+    m = df["_is_glosa"].fillna(False)
+
+    # --- KPIs principais ---
+    total_linhas = len(df)
+    periodo_ini = df[cm["data_realizado"]].min() if cm["data_realizado"] in df.columns else None
+    periodo_fim = df[cm["data_realizado"]].max() if cm["data_realizado"] in df.columns else None
+    valor_cobrado = float(df[cm["valor_cobrado"]].fillna(0).sum()) if cm["valor_cobrado"] in df.columns else 0.0
+    valor_glosado = float(df.loc[m, "_valor_glosa_abs"].sum())
+    taxa_glosa = (valor_glosado / valor_cobrado) if valor_cobrado else 0.0
+    convenios = int(df[cm["convenio"]].nunique()) if cm["convenio"] in df.columns else 0
+    prestadores = int(df[cm["prestador"]].nunique()) if cm["prestador"] in df.columns else 0
+
+    mantida_counts = (df[cm["mantida"]].value_counts(dropna=False).rename_axis("mantida").reset_index(name="itens")
+                      if cm["mantida"] in df.columns else pd.DataFrame(columns=["mantida","itens"]))
+    recupera_counts = (df[cm["recupera"]].value_counts(dropna=False).rename_axis("recupera").reset_index(name="itens")
+                       if cm["recupera"] in df.columns else pd.DataFrame(columns=["recupera","itens"]))
+
+    # --- Agrupamentos (apenas linhas glosadas) ---
+    base = df.loc[m].copy()
+
+    def _agg(df_, keys):
+        if df_.empty:
+            return df_
+        out = (df_.groupby(keys, dropna=False, as_index=False)
+                 .agg(Qtd=('_is_glosa', 'size'),
+                      Valor_Glosado=('_valor_glosa_abs', 'sum')))
+        out = out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
+        return out
+
+    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm["motivo"] and cm["desc_motivo"] else pd.DataFrame()
+    by_tipo     = _agg(base, [cm["tipo_glosa"]]) if cm["tipo_glosa"] else pd.DataFrame()
+    by_analista = _agg(base, [cm["analista"]]) if cm["analista"] else pd.DataFrame()
+    top_itens   = _agg(base, [cm["descricao"]]) if cm["descricao"] else pd.DataFrame()
+    by_convenio = _agg(base, [cm["convenio"]]) if cm["convenio"] else pd.DataFrame()
+
+    # Ajustes de nomes para exibição
+    if not top_motivos.empty:
+        top_motivos = top_motivos.rename(columns={
+            cm["motivo"]: "Motivo",
+            cm["desc_motivo"]: "Descrição do Motivo",
+            "Valor_Glosado": "Valor Glosado (R$)"
+        })
+    if not by_tipo.empty:
+        by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not by_analista.empty:
+        by_analista = by_analista.rename(columns={cm["analista"]: "Analista Atual", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not top_itens.empty:
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
+    if not by_convenio.empty:
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
+
+    return dict(
+        kpis=dict(
+            linhas=total_linhas,
+            periodo_ini=periodo_ini,
+            periodo_fim=periodo_fim,
+            convenios=convenios,
+            prestadores=prestadores,
+            valor_cobrado=valor_cobrado,
+            valor_glosado=valor_glosado,
+            taxa_glosa=taxa_glosa,
+            mantida=mantida_counts,
+            recupera=recupera_counts
+        ),
+        top_motivos=top_motivos,
+        by_tipo=by_tipo,
+        by_analista=by_analista,
+        top_itens=top_itens,
+        by_convenio=by_convenio
+    )
+
+# -----------------------------
+# Sidebar de parâmetros (mantida como no seu fluxo original)
 # -----------------------------
 with st.sidebar:
     st.header("Parâmetros")
@@ -856,276 +1165,423 @@ with st.sidebar:
     strip_zeros_codes = st.toggle("Normalizar códigos removendo zeros à esquerda", value=True)
 
 # -----------------------------
-# Upload dos arquivos
+# Abas principais
 # -----------------------------
-st.subheader("📤 Upload de arquivos")
-xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True)
-demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True)
+tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
-# --------------------------------------------------------------
-# PROCESSAMENTO DO DEMONSTRATIVO (SEMPRE) — para permitir wizard
-# (Não exibimos a tabela completa do demonstrativo para evitar mostrar itens extras)
-# --------------------------------------------------------------
-df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
+# =========================================================
+# ABA 1 — Conciliação TISS (conteúdo ORIGINAL movido para dentro da aba)
+# =========================================================
+with tab_conc:
+    st.subheader("📤 Upload de arquivos")
+    xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True, key="xml_up")
+    demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True, key="demo_up")
 
-if not df_demo.empty:
-    st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
-else:
-    if demo_files:
-        st.info("Carregue um Demonstrativo válido ou conclua o mapeamento manual.")
+    # PROCESSAMENTO DO DEMONSTRATIVO (SEMPRE) — para permitir wizard
+    # (Não exibimos a tabela completa do demonstrativo para evitar mostrar itens extras)
+    df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
 
-st.markdown("---")
-if st.button("🚀 Processar Conciliação & Analytics", type="primary"):
+    if not df_demo.empty:
+        st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
+    else:
+        if demo_files:
+            st.info("Carregue um Demonstrativo válido ou conclua o mapeamento manual.")
 
-    # 1) XML
-    df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
-    if df_xml.empty:
-        st.warning("Nenhum item extraído do(s) XML(s). Verifique os arquivos.")
-        st.stop()
-
-    st.subheader("📄 Itens extraídos dos XML (Consulta / SADT)")
-    st.dataframe(apply_currency(df_xml, ['valor_unitario','valor_total']), use_container_width=True, height=360)
-
-    if df_demo.empty:
-        st.warning("Nenhum demonstrativo válido para conciliar.")
-        st.stop()
-
-    # 2) Conciliação (somente a partir do XML)
-    result = conciliar_itens(
-        df_xml=df_xml,
-        df_demo=df_demo,
-        tolerance_valor=float(tolerance_valor),
-        fallback_por_descricao=fallback_desc
-    )
-    conc = result["conciliacao"]
-    unmatch = result["nao_casados"]
-
-    st.subheader("🔗 Conciliação Item a Item (XML × Demonstrativo)")
-    conc_disp = apply_currency(
-        conc.copy(),
-        ['valor_unitario','valor_total','valor_apresentado','valor_glosa','valor_pago','apresentado_diff']
-    )
-    st.dataframe(conc_disp, use_container_width=True, height=460)
-
-    c1, c2 = st.columns(2)
-    c1.metric("Itens conciliados", len(conc))
-    c2.metric("Itens não conciliados (somente XML)", len(unmatch))
-
-    if not unmatch.empty:
-        st.subheader("❗ Itens (do XML) não conciliados")
-        st.dataframe(apply_currency(unmatch.copy(), ['valor_unitario','valor_total']), use_container_width=True, height=300)
-        st.download_button("Baixar Não Conciliados (CSV)", data=unmatch.to_csv(index=False).encode("utf-8"), file_name="nao_conciliados.csv", mime="text/csv")
-
-    # 3) Analytics — APENAS COM BASE NO CONCILIADO
     st.markdown("---")
-    st.subheader("📊 Analytics de Glosa (apenas itens conciliados)")
+    if st.button("🚀 Processar Conciliação & Analytics", type="primary", key="btn_conc"):
+        # 1) XML
+        df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
+        if df_xml.empty:
+            st.warning("Nenhum item extraído do(s) XML(s). Verifique os arquivos.")
+            st.stop()
 
-    # 3.1 KPI por Competência (a partir do conc)
-    st.markdown("### 📈 Tendência por competência")
-    kpi_comp = kpis_por_competencia(conc)
-    st.dataframe(apply_currency(kpi_comp, ['valor_apresentado','valor_pago','valor_glosa']), use_container_width=True)
-    try:
-        st.line_chart(kpi_comp.set_index('competencia')[['valor_apresentado','valor_pago','valor_glosa']])
-    except Exception:
-        pass
+        st.subheader("📄 Itens extraídos dos XML (Consulta / SADT)")
+        st.dataframe(apply_currency(df_xml, ['valor_unitario','valor_total']), use_container_width=True, height=360)
 
-    # 3.2 Top Itens Glosados (valor e %)
-    st.markdown("### 🏆 TOP itens glosados (valor e %)")
-    min_apres = st.number_input("Corte mínimo de Apresentado para ranking por % (R$)", min_value=0.0, value=500.0, step=50.0)
-    top_valor, top_pct = ranking_itens_glosa(conc, min_apresentado=min_apres, topn=20)
-    t1, t2 = st.columns(2)
-    with t1:
-        st.markdown("**Por valor de glosa (TOP 20)**")
-        st.dataframe(apply_currency(top_valor, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
-    with t2:
-        st.markdown("**Por % de glosa (TOP 20)**")
-        st.dataframe(apply_currency(top_pct, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
+        if df_demo.empty:
+            st.warning("Nenhum demonstrativo válido para conciliar.")
+            st.stop()
 
-    # 3.3 Motivos de Glosa (filtro por competência)
-    st.markdown("### 🧩 Motivos de glosa — análise")
-    comp_opts = ['(todas)']
-    if 'competencia' in conc.columns:
-        comp_opts += sorted(conc['competencia'].dropna().astype(str).unique().tolist())
-    comp_sel = st.selectbox("Filtrar por competência", comp_opts)
-    motdf = motivos_glosa(conc, None if comp_sel=='(todas)' else comp_sel)
-    st.dataframe(apply_currency(motdf, ['valor_glosa','valor_apresentado']), use_container_width=True)
-
-    # 3.4 Médicos (filtro por competência)
-    st.markdown("### 👩‍⚕️ Médicos — ranking por glosa")
-    if 'competencia' in conc.columns:
-        comp_med = st.selectbox("Competência (médicos)", 
-        ['(todas)'] + sorted(conc['competencia'].dropna().astype(str).unique().tolist())
+        # 2) Conciliação (somente a partir do XML)
+        result = conciliar_itens(
+            df_xml=df_xml,
+            df_demo=df_demo,
+            tolerance_valor=float(tolerance_valor),
+            fallback_por_descricao=fallback_desc
         )
-        med_base = conc if comp_med == '(todas)' else conc[conc['competencia'] == comp_med]
-    else:
-        med_base = conc
-    med_rank = (med_base.groupby(['medico'], dropna=False, as_index=False)
-                .agg(valor_apresentado=('valor_apresentado','sum'),
-                     valor_glosa=('valor_glosa','sum'),
-                     valor_pago=('valor_pago','sum'),
-                     itens=('arquivo','count')))
-    med_rank['glosa_pct'] = med_rank.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-    st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]), ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
+        conc = result["conciliacao"]
+        unmatch = result["nao_casados"]
 
-    # 3.5 Glosa por Tabela (22/19) — se existir no conciliado
-    st.markdown("### 🧾 Glosa por Tabela (22/19)")
-    if 'Tabela' in conc.columns:
-        tab = (conc.groupby('Tabela', as_index=False)
-               .agg(valor_apresentado=('valor_apresentado','sum'),
-                    valor_glosa=('valor_glosa','sum'),
-                    valor_pago=('valor_pago','sum')))
-        tab['glosa_pct'] = tab.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-        st.dataframe(apply_currency(tab, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
-    else:
-        st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
+        st.subheader("🔗 Conciliação Item a Item (XML × Demonstrativo)")
+        conc_disp = apply_currency(
+            conc.copy(),
+            ['valor_unitario','valor_total','valor_apresentado','valor_glosa','valor_pago','apresentado_diff']
+        )
+        st.dataframe(conc_disp, use_container_width=True, height=460)
 
-    # 3.6 Qualidade da Conciliação (origem)
-    if 'matched_on' in conc.columns:
-        st.markdown("### 🧪 Qualidade da conciliação (origem do match)")
-        match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
-        st.bar_chart(match_dist.set_index('origem'))
-        st.dataframe(match_dist, use_container_width=True)
+        c1, c2 = st.columns(2)
+        c1.metric("Itens conciliados", len(conc))
+        c2.metric("Itens não conciliados (somente XML)", len(unmatch))
 
-    # 3.7 Outliers em valor apresentado
-    st.markdown("### 🚩 Outliers em valor apresentado (por procedimento)")
-    out_df = outliers_por_procedimento(conc, k=1.5)
-    if out_df.empty:
-        st.info("Nenhum outlier identificado com o critério atual (IQR).")
-    else:
-        st.dataframe(out_df, use_container_width=True, height=280)
-        st.download_button("Baixar Outliers (CSV)", data=out_df.to_csv(index=False).encode("utf-8"), file_name="outliers_valor_apresentado.csv", mime="text/csv")
+        if not unmatch.empty:
+            st.subheader("❗ Itens (do XML) não conciliados")
+            st.dataframe(apply_currency(unmatch.copy(), ['valor_unitario','valor_total']), use_container_width=True, height=300)
+            st.download_button("Baixar Não Conciliados (CSV)", data=unmatch.to_csv(index=False).encode("utf-8"),
+                               file_name="nao_conciliados.csv", mime="text/csv")
 
-    # 3.8 Simulador de Faturamento (what-if)
-    st.markdown("### 🧮 Simulador de faturamento (what‑if por motivo de glosa)")
-    motivos_disponiveis = sorted(conc['motivo_glosa_codigo'].dropna().astype(str).unique().tolist()) if 'motivo_glosa_codigo' in conc.columns else []
-    if motivos_disponiveis:
-        cols_sim = st.columns(min(4, max(1, len(motivos_disponiveis))))
-        ajustes = {}
-        for i, cod in enumerate(motivos_disponiveis):
-            col = cols_sim[i % len(cols_sim)]
-            with col:
-                fator = st.slider(f"Motivo {cod} → fator (0–1)", 0.0, 1.0, 1.0, 0.05, help="Ex.: 0,8 reduz a glosa em 20% para esse motivo.")
-                ajustes[cod] = fator
-        sim = simulador_glosa(conc, ajustes)
-        st.write("**Resumo do cenário simulado:**")
-        res = (sim.agg(
-            total_apres=('valor_apresentado','sum'),
-            glosa=('valor_glosa','sum'),
-            glosa_sim=('valor_glosa_sim','sum'),
-            pago=('valor_pago','sum'),
-            pago_sim=('valor_pago_sim','sum')
-        ))
-        st.json({k: f_currency(v) for k, v in res.to_dict().items()})
-    else:
-        st.info("Sem motivos de glosa identificados para simulação.")
+        # 3) Analytics — APENAS COM BASE NO CONCILIADO
+        st.markdown("---")
+        st.subheader("📊 Analytics de Glosa (apenas itens conciliados)")
 
-    # 4) Auditoria por guia — DESATIVADA
-    # ----------------------------------------------------------
-    # auditoria (desativado): seção intencionalmente desabilitada.
-    # df_aud = auditar_guias(df_xml, prazo_retorno=prazo_retorno)
-    # st.markdown("---")
-    # st.subheader("🔎 Auditoria por Guia (Duplicidade e Retorno)")
-    # if df_aud.empty:
-    #     st.info("Sem dados para auditoria.")
-    # else:
-    #     st.dataframe(df_aud, use_container_width=True, height=360)
-    # ----------------------------------------------------------
+        # 3.1 KPI por Competência (a partir do conc)
+        st.markdown("### 📈 Tendência por competência")
+        kpi_comp = kpis_por_competencia(conc)
+        st.dataframe(apply_currency(kpi_comp, ['valor_apresentado','valor_pago','valor_glosa']), use_container_width=True)
+        try:
+            st.line_chart(kpi_comp.set_index('competencia')[['valor_apresentado','valor_pago','valor_glosa']])
+        except Exception:
+            pass
 
-    # 5) Exportação Excel consolidado (apenas itens a partir do XML e os conciliados)
-    st.markdown("---")
-    st.subheader("📥 Exportar Excel Consolidado")
+        # 3.2 Top Itens Glosados (valor e %)
+        st.markdown("### 🏆 TOP itens glosados (valor e %)")
+        min_apres = st.number_input("Corte mínimo de Apresentado para ranking por % (R$)", min_value=0.0, value=500.0, step=50.0, key="min_apres_pct")
+        top_valor, top_pct = ranking_itens_glosa(conc, min_apresentado=min_apres, topn=20)
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown("**Por valor de glosa (TOP 20)**")
+            st.dataframe(apply_currency(top_valor, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
+        with t2:
+            st.markdown("**Por % de glosa (TOP 20)**")
+            st.dataframe(apply_currency(top_pct, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-    # Itens_Demo (somente os que casaram com XML)
-    demo_cols_for_export = [c for c in [
-        'numero_lote','competencia','numeroGuiaPrestador','numeroGuiaOperadora',
-        'codigo_procedimento','descricao_procedimento',
-        'quantidade_apresentada','valor_apresentado','valor_glosa','valor_pago',
-        'motivo_glosa_codigo','motivo_glosa_descricao','Tabela'
-    ] if c in conc.columns]
-    itens_demo_match = pd.DataFrame()
-    if demo_cols_for_export:
-        itens_demo_match = conc[demo_cols_for_export].drop_duplicates().copy()
+        # 3.3 Motivos de Glosa (filtro por competência)
+        st.markdown("### 🧩 Motivos de glosa — análise")
+        comp_opts = ['(todas)']
+        if 'competencia' in conc.columns:
+            comp_opts += sorted(conc['competencia'].dropna().astype(str).unique().tolist())
+        comp_sel = st.selectbox("Filtrar por competência", comp_opts, key="comp_mot")
+        motdf = motivos_glosa(conc, None if comp_sel=='(todas)' else comp_sel)
+        st.dataframe(apply_currency(motdf, ['valor_glosa','valor_apresentado']), use_container_width=True)
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as wr:
-        # Sempre origem XML
-        df_xml.to_excel(wr, index=False, sheet_name='Itens_XML')
+        # 3.4 Médicos (filtro por competência)
+        st.markdown("### 👩‍⚕️ Médicos — ranking por glosa")
+        if 'competencia' in conc.columns:
+            comp_med = st.selectbox("Competência (médicos)",
+                                    ['(todas)'] + sorted(conc['competencia'].dropna().astype(str).unique().tolist()),
+                                    key="comp_med")
+            med_base = conc if comp_med == '(todas)' else conc[conc['competencia'] == comp_med]
+        else:
+            med_base = conc
+        med_rank = (med_base.groupby(['medico'], dropna=False, as_index=False)
+                    .agg(valor_apresentado=('valor_apresentado','sum'),
+                         valor_glosa=('valor_glosa','sum'),
+                         valor_pago=('valor_pago','sum'),
+                         itens=('arquivo','count')))
+        med_rank['glosa_pct'] = med_rank.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+        st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]),
+                                    ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-        # Apenas demonstrativo que teve MATCH com XML
-        if not itens_demo_match.empty:
-            itens_demo_match.to_excel(wr, index=False, sheet_name='Itens_Demo')
+        # 3.5 Glosa por Tabela (22/19) — se existir no conciliado
+        st.markdown("### 🧾 Glosa por Tabela (22/19)")
+        if 'Tabela' in conc.columns:
+            tab = (conc.groupby('Tabela', as_index=False)
+                   .agg(valor_apresentado=('valor_apresentado','sum'),
+                        valor_glosa=('valor_glosa','sum'),
+                        valor_pago=('valor_pago','sum')))
+            tab['glosa_pct'] = tab.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+            st.dataframe(apply_currency(tab, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
+        else:
+            st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
 
-        # Conciliações e não casados
-        conc.to_excel(wr, index=False, sheet_name='Conciliação')
-        unmatch.to_excel(wr, index=False, sheet_name='Nao_Casados')
+        # 3.6 Qualidade da Conciliação (origem)
+        if 'matched_on' in conc.columns:
+            st.markdown("### 🧪 Qualidade da conciliação (origem do match)")
+            match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
+            st.bar_chart(match_dist.set_index('origem'))
+            st.dataframe(match_dist, use_container_width=True)
 
-        # Motivos
-        mot_x = motivos_glosa(conc, None)
-        mot_x.to_excel(wr, index=False, sheet_name='Motivos_Glosa')
+        # 3.7 Outliers em valor apresentado
+        st.markdown("### 🚩 Outliers em valor apresentado (por procedimento)")
+        out_df = outliers_por_procedimento(conc, k=1.5)
+        if out_df.empty:
+            st.info("Nenhum outlier identificado com o critério atual (IQR).")
+        else:
+            st.dataframe(out_df, use_container_width=True, height=280)
+            st.download_button("Baixar Outliers (CSV)", data=out_df.to_csv(index=False).encode("utf-8"),
+                               file_name="outliers_valor_apresentado.csv", mime="text/csv")
 
-        # Procedimentos
-        proc_x = (conc.groupby(['codigo_procedimento','descricao_procedimento'], dropna=False, as_index=False)
-                  .agg(valor_apresentado=('valor_apresentado','sum'),
-                       valor_glosa=('valor_glosa','sum'),
-                       valor_pago=('valor_pago','sum'),
-                       itens=('arquivo','count')))
-        proc_x['glosa_pct'] = proc_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-        proc_x.to_excel(wr, index=False, sheet_name='Procedimentos_Glosa')
+        # 3.8 Simulador de Faturamento (what-if)
+        st.markdown("### 🧮 Simulador de faturamento (what‑if por motivo de glosa)")
+        motivos_disponiveis = sorted(conc['motivo_glosa_codigo'].dropna().astype(str).unique().tolist()) if 'motivo_glosa_codigo' in conc.columns else []
+        if motivos_disponiveis:
+            cols_sim = st.columns(min(4, max(1, len(motivos_disponiveis))))
+            ajustes = {}
+            for i, cod in enumerate(motivos_disponiveis):
+                col = cols_sim[i % len(cols_sim)]
+                with col:
+                    fator = st.slider(f"Motivo {cod} → fator (0–1)", 0.0, 1.0, 1.0, 0.05,
+                                      help="Ex.: 0,8 reduz a glosa em 20% para esse motivo.", key=f"sim_{cod}")
+                    ajustes[cod] = fator
+            sim = simulador_glosa(conc, ajustes)
+            st.write("**Resumo do cenário simulado:**")
+            res = (sim.agg(
+                total_apres=('valor_apresentado','sum'),
+                glosa=('valor_glosa','sum'),
+                glosa_sim=('valor_glosa_sim','sum'),
+                pago=('valor_pago','sum'),
+                pago_sim=('valor_pago_sim','sum')
+            ))
+            st.json({k: f_currency(v) for k, v in res.to_dict().items()})
+        else:
+            st.info("Sem motivos de glosa identificados para simulação.")
 
-        # Médicos
-        med_x = (conc.groupby(['medico'], dropna=False, as_index=False)
-                 .agg(valor_apresentado=('valor_apresentado','sum'),
-                      valor_glosa=('valor_glosa','sum'),
-                      valor_pago=('valor_pago','sum'),
-                      itens=('arquivo','count')))
-        med_x['glosa_pct'] = med_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-        med_x.to_excel(wr, index=False, sheet_name='Medicos')
+        # 4) Auditoria por guia — DESATIVADA
 
-        # Lotes
-        if 'numero_lote' in conc.columns:
-            lot_x = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
+        # 5) Exportação Excel consolidado (apenas itens a partir do XML e os conciliados)
+        st.markdown("---")
+        st.subheader("📥 Exportar Excel Consolidado")
+
+        # Itens_Demo (somente os que casaram com XML)
+        demo_cols_for_export = [c for c in [
+            'numero_lote','competencia','numeroGuiaPrestador','numeroGuiaOperadora',
+            'codigo_procedimento','descricao_procedimento',
+            'quantidade_apresentada','valor_apresentado','valor_glosa','valor_pago',
+            'motivo_glosa_codigo','motivo_glosa_descricao','Tabela'
+        ] if c in conc.columns]
+        itens_demo_match = pd.DataFrame()
+        if demo_cols_for_export:
+            itens_demo_match = conc[demo_cols_for_export].drop_duplicates().copy()
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as wr:
+            # Sempre origem XML
+            df_xml.to_excel(wr, index=False, sheet_name='Itens_XML')
+
+            # Apenas demonstrativo que teve MATCH com XML
+            if not itens_demo_match.empty:
+                itens_demo_match.to_excel(wr, index=False, sheet_name='Itens_Demo')
+
+            # Conciliações e não casados
+            conc.to_excel(wr, index=False, sheet_name='Conciliação')
+            unmatch.to_excel(wr, index=False, sheet_name='Nao_Casados')
+
+            # Motivos
+            mot_x = motivos_glosa(conc, None)
+            mot_x.to_excel(wr, index=False, sheet_name='Motivos_Glosa')
+
+            # Procedimentos
+            proc_x = (conc.groupby(['codigo_procedimento','descricao_procedimento'], dropna=False, as_index=False)
+                      .agg(valor_apresentado=('valor_apresentado','sum'),
+                           valor_glosa=('valor_glosa','sum'),
+                           valor_pago=('valor_pago','sum'),
+                           itens=('arquivo','count')))
+            proc_x['glosa_pct'] = proc_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+            proc_x.to_excel(wr, index=False, sheet_name='Procedimentos_Glosa')
+
+            # Médicos
+            med_x = (conc.groupby(['medico'], dropna=False, as_index=False)
                      .agg(valor_apresentado=('valor_apresentado','sum'),
                           valor_glosa=('valor_glosa','sum'),
                           valor_pago=('valor_pago','sum'),
                           itens=('arquivo','count')))
-            lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-            lot_x.to_excel(wr, index=False, sheet_name='Lotes')
+            med_x['glosa_pct'] = med_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+            med_x.to_excel(wr, index=False, sheet_name='Medicos')
 
-        # KPIs por competência
-        kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
+            # Lotes
+            if 'numero_lote' in conc.columns:
+                lot_x = (conc.groupby(['numero_lote'], dropna=False, as_index=False)
+                         .agg(valor_apresentado=('valor_apresentado','sum'),
+                              valor_glosa=('valor_glosa','sum'),
+                              valor_pago=('valor_pago','sum'),
+                              itens=('arquivo','count')))
+                lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
+                lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
-        # Top Itens
-        top_valor.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Valor')
-        top_pct.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Pct')
+            # KPIs por competência
+            kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
 
-        # Qualidade conciliação
-        if 'matched_on' in conc.columns:
-            match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
-            match_dist.to_excel(wr, index=False, sheet_name='Qualidade_Conciliacao')
+            # Top Itens
+            top_valor.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Valor')
+            top_pct.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Pct')
 
-        # Outliers
-        if not out_df.empty:
-            out_df.to_excel(wr, index=False, sheet_name='Outliers')
+            # Qualidade conciliação
+            if 'matched_on' in conc.columns:
+                match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
+                match_dist.to_excel(wr, index=False, sheet_name='Qualidade_Conciliacao')
 
-        # Auditoria — DESATIVADO (não exporta)
-        # if not df_aud.empty:
-        #     df_aud.to_excel(wr, index=False, sheet_name='Auditoria_Guias')
+            # Outliers
+            if not out_df.empty:
+                out_df.to_excel(wr, index=False, sheet_name='Outliers')
 
-        # Ajustes de largura e congelamento
-        for name in wr.sheets:
-            ws = wr.sheets[name]
-            ws.freeze_panes = "A2"
-            for col in ws.columns:
-                try:
-                    col_letter = col[0].column_letter
-                except Exception:
-                    continue
-                max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-                ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+            # Ajustes de largura e congelamento
+            for name in wr.sheets:
+                ws = wr.sheets[name]
+                ws.freeze_panes = "A2"
+                for col in ws.columns:
+                    try:
+                        col_letter = col[0].column_letter
+                    except Exception:
+                        continue
+                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
 
-    st.download_button(
-        "⬇️ Baixar Excel consolidado",
-        data=buf.getvalue(),
-        file_name="tiss_conciliacao_analytics.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        st.download_button(
+            "⬇️ Baixar Excel consolidado",
+            data=buf.getvalue(),
+            file_name="tiss_conciliacao_analytics.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# =========================================================
+# ABA 2 — Faturas Glosadas (XLSX) — independente
+# =========================================================
+with tab_glosas:
+    st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
+    st.caption("Carregue o(s) arquivo(s) de Faturas Glosadas (AMHP/similar). A análise abaixo é feita somente com base nesses XLSX.")
+
+    glosas_files = st.file_uploader("Relatórios de Faturas Glosadas (.xlsx):", type=["xlsx"], accept_multiple_files=True, key="glosas_xlsx_up")
+    if not glosas_files:
+        st.info("Envie pelo menos um arquivo .xlsx para iniciar.")
+    else:
+        if st.button("📊 Processar Faturas Glosadas", type="primary", key="proc_glosas"):
+            df_g, colmap = read_glosas_xlsx(glosas_files)
+            if df_g.empty:
+                st.warning("Não foi possível ler os arquivos enviados.")
+            else:
+                analytics = build_glosas_analytics(df_g, colmap)
+                if not analytics:
+                    st.warning("Arquivos lidos, mas não foi possível identificar colunas mínimas.")
+                else:
+                    k = analytics["kpis"]
+
+                    # ---------- KPIs ----------
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Registros", f"{k['linhas']:,}".replace(",", "."))
+                    periodo_txt = ""
+                    if k["periodo_ini"] is not None and k["periodo_fim"] is not None:
+                        periodo_txt = f"{k['periodo_ini']:%d/%m/%Y} → {k['periodo_fim']:%d/%m/%Y}"
+                    c2.metric("Período (Realizado)", periodo_txt or "—")
+                    c3.metric("Convênios", f"{k['convenios']}")
+                    c4.metric("Prestadores", f"{k['prestadores']}")
+
+                    c5, c6, c7 = st.columns(3)
+                    c5.metric("Valor Cobrado", f_currency(k["valor_cobrado"]))
+                    c6.metric("Valor Glosado", f_currency(k["valor_glosado"]))
+                    c7.metric("Taxa de Glosa", f"{(k['taxa_glosa']*100):.2f}%")
+
+                    # ---------- Distribuição Mantida/Recupera ----------
+                    st.markdown("### 🧭 Situação de recurso")
+                    colA, colB = st.columns(2)
+                    with colA:
+                        if not k["mantida"].empty:
+                            st.dataframe(k["mantida"], use_container_width=True, height=150)
+                    with colB:
+                        if not k["recupera"].empty:
+                            st.dataframe(k["recupera"], use_container_width=True, height=150)
+
+                    # ---------- Top Motivos ----------
+                    st.markdown("### 🥇 Top motivos de glosa (por valor)")
+                    mot = analytics["top_motivos"].head(20) if not analytics["top_motivos"].empty else pd.DataFrame()
+                    if mot.empty:
+                        st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
+                    else:
+                        st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+                        try:
+                            chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                            st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
+                        except Exception:
+                            pass
+
+                    # ---------- Tipo de Glosa ----------
+                    st.markdown("### 🧷 Tipo de glosa")
+                    by_tipo = analytics["by_tipo"]
+                    if by_tipo.empty:
+                        st.info("Coluna de 'Tipo de Glosa' não encontrada.")
+                    else:
+                        st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+
+                    # ---------- Por Analista ----------
+                    st.markdown("### 👩‍💼 Analista — concentração de glosas")
+                    by_analista = analytics["by_analista"].head(20)
+                    if by_analista.empty:
+                        st.info("Coluna de 'Analista Atual' não encontrada.")
+                    else:
+                        st.dataframe(apply_currency(by_analista, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+
+                    # ---------- Top Itens ----------
+                    st.markdown("### 🧩 Itens/descrições com maior valor glosado")
+                    top_itens = analytics["top_itens"].head(20)
+                    if top_itens.empty:
+                        st.info("Coluna de 'Descrição' não encontrada.")
+                    else:
+                        st.dataframe(apply_currency(top_itens, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+
+                    # ---------- Por Convênio ----------
+                    st.markdown("### 🏥 Convênios com maior valor glosado")
+                    by_conv = analytics["by_convenio"].head(20)
+                    if by_conv.empty:
+                        st.info("Coluna de 'Convênio' não encontrada.")
+                    else:
+                        st.dataframe(apply_currency(by_conv, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+                        try:
+                            chart_conv = by_conv.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                            st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
+                        except Exception:
+                            pass
+
+                    # ---------- Exportar Excel resumido ----------
+                    st.markdown("---")
+                    st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
+                    from io import BytesIO
+                    buf = BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as wr:
+                        # KPIs (linha única)
+                        kpi_df = pd.DataFrame([{
+                            "Registros": k["linhas"],
+                            "Período Início": k["periodo_ini"].strftime("%d/%m/%Y") if k["periodo_ini"] else "",
+                            "Período Fim": k["periodo_fim"].strftime("%d/%m/%Y") if k["periodo_fim"] else "",
+                            "Convênios": k["convenios"],
+                            "Prestadores": k["prestadores"],
+                            "Valor Cobrado (R$)": round(k["valor_cobrado"], 2),
+                            "Valor Glosado (R$)": round(k["valor_glosado"], 2),
+                            "Taxa de Glosa (%)": round(k["taxa_glosa"]*100, 2),
+                        }])
+                        kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
+
+                        if not k["mantida"].empty: k["mantida"].to_excel(wr, index=False, sheet_name="Mantida")
+                        if not k["recupera"].empty: k["recupera"].to_excel(wr, index=False, sheet_name="Recupera")
+                        if not mot.empty: mot.to_excel(wr, index=False, sheet_name="Top_Motivos")
+                        if not by_tipo.empty: by_tipo.to_excel(wr, index=False, sheet_name="Tipo_Glosa")
+                        if not by_analista.empty: by_analista.to_excel(wr, index=False, sheet_name="Analista")
+                        if not top_itens.empty: top_itens.to_excel(wr, index=False, sheet_name="Top_Itens")
+                        if not by_conv.empty: by_conv.to_excel(wr, index=False, sheet_name="Convenios")
+
+                        # Dados brutos (opcional, somente colunas relevantes)
+                        col_export = [c for c in [
+                            colmap.get("data_realizado"), colmap.get("convenio"), colmap.get("prestador"),
+                            colmap.get("descricao"), colmap.get("tipo_glosa"),
+                            colmap.get("motivo"), colmap.get("desc_motivo"),
+                            colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
+                        ] if c and c in df_g.columns]
+                        if col_export:
+                            raw = df_g[col_export].copy()
+                            raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
+
+                        # Ajustes visuais
+                        for name in wr.sheets:
+                            ws = wr.sheets[name]
+                            ws.freeze_panes = "A2"
+                            for col in ws.columns:
+                                try:
+                                    col_letter = col[0].column_letter
+                                except Exception:
+                                    continue
+                                max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+                                ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+                    st.download_button(
+                        "⬇️ Baixar análise (XLSX)",
+                        data=buf.getvalue(),
+                        file_name="analise_faturas_glosadas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
