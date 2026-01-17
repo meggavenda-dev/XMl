@@ -35,8 +35,10 @@ from selenium.common.exceptions import TimeoutException, ElementClickIntercepted
 try:
     chrome_bin_secret = st.secrets.get("env", {}).get("CHROME_BINARY", None)
     driver_bin_secret = st.secrets.get("env", {}).get("CHROMEDRIVER_BINARY", None)
-    if chrome_bin_secret: os.environ["CHROME_BINARY"] = chrome_bin_secret
-    if driver_bin_secret: os.environ["CHROMEDRIVER_BINARY"] = driver_bin_secret
+    if chrome_bin_secret:
+        os.environ["CHROME_BINARY"] = chrome_bin_secret
+    if driver_bin_secret:
+        os.environ["CHROMEDRIVER_BINARY"] = driver_bin_secret
 except Exception:
     pass
 
@@ -50,7 +52,7 @@ def configurar_driver():
     if os.path.exists(chrome_binary):
         opts.binary_location = chrome_binary
 
-    # Flags que ajudam muito em headless
+    # Flags para headless robusto
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -1407,9 +1409,9 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     if not by_tipo.empty:
         by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
     if not top_itens.empty:
-        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor Glosado":"Valor Glosado (R$)"})
     if not by_convenio.empty:
-        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor Glosado":"Valor Glosado (R$)"})
 
     return dict(
         kpis=dict(
@@ -1448,6 +1450,27 @@ with tab_conc:
     xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True, key="xml_up")
     demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True, key="demo_up")
 
+    # 🔎 Pesquisar guia direto no portal (atalho global na aba Conciliação)
+    st.markdown("### 🔎 Pesquisar guia no portal (AMHP)")
+    col_a, col_b = st.columns([0.6, 0.4])
+    with col_a:
+        guia_amhp = st.text_input(
+            "Nº AMHPTISS / Nº Atendimento",
+            value="",
+            placeholder="Digite o número exato (ex.: 61916098)",
+            key="guia_amhp_global"
+        )
+    with col_b:
+        st.write("")
+        if st.button("🌐 Pesquisar no portal", key="btn_pesquisar_global", type="primary", disabled=not bool(guia_amhp.strip())):
+            gnum = re.sub(r"\D+", "", guia_amhp.strip())
+            if gnum:
+                st.toast(f"Pesquisando guia AMHP/TISS: {gnum}", icon="🔎")
+                modal_amhptiss_site(gnum)
+            else:
+                st.warning("Informe um número válido para pesquisar.")
+
+    # PROCESSAMENTO DO DEMONSTRATIVO (sempre) — permite wizard
     df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
     if not df_demo.empty:
         st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
@@ -1642,6 +1665,7 @@ with tab_conc:
                 lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
             kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
+
         st.download_button(
             "⬇️ Baixar Excel consolidado",
             data=buf.getvalue(),
@@ -1655,6 +1679,26 @@ with tab_conc:
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
     st.caption("A análise respeita filtros por **Convênio** e por **mês de Pagamento**. O processamento é persistido com session_state.")
+
+    # 🔎 Atalho de pesquisa no portal (aba Glosas)
+    st.markdown("### 🔎 Pesquisar guia no portal (AMHP)")
+    cga, cgb = st.columns([0.6, 0.4])
+    with cga:
+        guia_amhp2 = st.text_input(
+            "Nº AMHPTISS / Nº Atendimento",
+            value="",
+            placeholder="Digite o número exato (ex.: 61916098)",
+            key="guia_amhp_glosas"
+        )
+    with cgb:
+        st.write("")
+        if st.button("🌐 Pesquisar no portal", key="btn_pesquisar_glosas", type="primary", disabled=not bool(guia_amhp2.strip())):
+            gnum2 = re.sub(r"\D+", "", guia_amhp2.strip())
+            if gnum2:
+                st.toast(f"Pesquisando guia AMHP/TISS: {gnum2}", icon="🔎")
+                modal_amhptiss_site(gnum2)
+            else:
+                st.warning("Informe um número válido para pesquisar.")
 
     if "glosas_ready" not in st.session_state:
         st.session_state.glosas_ready = False
@@ -1789,7 +1833,7 @@ with tab_glosas:
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # Top motivos / tipo / itens / convênios
+        # ---------- Top motivos / Tipos ----------
         analytics = build_glosas_analytics(df_view, colmap)
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
@@ -1810,6 +1854,7 @@ with tab_glosas:
         else:
             st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
+        # ---------- Itens/descrições com maior valor glosado ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
         if top_itens.empty:
@@ -1827,21 +1872,62 @@ with tab_glosas:
                 use_container_width=True,
                 height=360
             )
-            st.caption("Clique em **🔎 Detalhes** para ver a relação (abaixo).")
+            st.caption("Use **🔎 Detalhes** para ver a relação ou **🌐 Pesquisar** para abrir no portal AMHP.")
 
+            # Ações por item: Detalhes + Pesquisar no site
             for i, row in df_items_top.reset_index(drop=True).iterrows():
                 col_desc, col_val, col_btn = st.columns([0.55, 0.15, 0.30])
                 item_nome = row.get('Descrição do Item', '')
+                
                 with col_desc:
                     st.write(f"**{item_nome}**")
                 with col_val:
-                    try: st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
-                    except: st.write("-")
+                    try:
+                        st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
+                    except:
+                        st.write("-")
+                
                 with col_btn:
-                    if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
-                        st.session_state["glosas_item_modal"] = str(item_nome)
-                        st.rerun()
+                    c_det, c_site = st.columns(2)
+                    
+                    # 🔎 Detalhes (abre o painel com a relação de linhas desse item)
+                    with c_det:
+                        if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
+                            st.session_state["glosas_item_modal"] = str(item_nome)
+                            st.rerun()
+                    
+                    # 🌐 Pesquisar no site (seleciona uma guia e abre modal Selenium)
+                    with c_site:
+                        desc_col = colmap.get("descricao")
+                        amhp_col = colmap.get("amhptiss")
+                        if desc_col and amhp_col and (desc_col in df_view.columns) and (amhp_col in df_view.columns):
+                            df_guia_temp = df_view[df_view[desc_col] == item_nome]
+                            lista_guias = (
+                                df_guia_temp[amhp_col]
+                                .dropna()
+                                .astype(str)
+                                .map(lambda s: re.sub(r"\D+", "", s))
+                                .unique()
+                                .tolist()
+                            )
+                        else:
+                            lista_guias = []
+                        
+                        if lista_guias:
+                            guia_escolhida = st.selectbox(
+                                "Guia:",
+                                lista_guias,
+                                key=f"sel_guia_{i}",
+                                label_visibility="collapsed"
+                            )
+                            if st.button("🌐 Pesquisar", key=f"btn_site_{i}", use_container_width=True):
+                                gnum = re.sub(r"\D+", "", str(guia_escolhida).strip())
+                                st.toast(f"Pesquisando guia AMHP/TISS: {gnum}", icon="🔎")
+                                modal_amhptiss_site(gnum)
+                        else:
+                            st.caption("Sem guia AMHP")
 
+            # ---------- Painel de detalhe do item ----------
             def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
                 dcol = colmap.get("descricao")
                 if not dcol or not dcol in df_view.columns:
