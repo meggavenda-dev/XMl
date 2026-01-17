@@ -88,6 +88,22 @@ def _normtxt(s: str) -> str:
 # Persistência de mapeamento (JSON)
 MAP_FILE = "demo_mappings.json"
 
+def categorizar_motivo_ans(codigo: str) -> str:
+    codigo = str(codigo).strip()
+    # Mapeamento simplificado baseado na TISS/ANS
+    # 1000: Glosas Administrativas / Cadastro
+    if codigo in ['1001', '1002', '1003', '1006', '1009']: return "Cadastro/Elegibilidade"
+    # 1200: Autorização
+    if codigo in ['1201', '1202', '1205', '1209']: return "Autorização/SADT"
+    # 1800: Valores / Tabela
+    if codigo in ['1801', '1802', '1805', '1806']: return "Tabela/Preços"
+    # 2000+: Auditoria Médica e Técnica
+    if codigo.startswith('20') or codigo.startswith('22'): return "Auditoria Médica/Técnica"
+    # 2500: Documentação
+    if codigo in ['2501', '2505', '2509']: return "Documentação/Físico"
+    
+    return "Outros/Administrativa"
+
 def load_demo_mappings() -> dict:
     if os.path.exists(MAP_FILE):
         try:
@@ -725,24 +741,25 @@ def motivos_glosa(df_conc: pd.DataFrame, competencia: Optional[str] = None) -> p
     if base.empty:
         return base
         
-    # 1. Filtro de competência (se houver)
+    # FILTRO: Apenas o que foi glosado de fato
+    base = base[base['valor_glosa'] > 0]
+    
     if competencia and 'competencia' in base.columns:
         base = base[base['competencia'] == competencia]
     
-    # 2. FILTRO CRÍTICO: Considerar apenas linhas onde houve glosa de fato
-    base = base[base['valor_glosa'] > 0]
-    
-    if base.empty:
-        return pd.DataFrame()
+    if base.empty: return pd.DataFrame()
 
-    # 3. Agrupamento
-    mot = (base.groupby(['motivo_glosa_codigo', 'motivo_glosa_descricao'], dropna=False, as_index=False)
-           .agg(valor_glosa=('valor_glosa', 'sum'),
-                itens_atingidos=('codigo_procedimento', 'count')))
+    # Agrupamento inicial
+    mot = (base.groupby(['motivo_glosa_codigo','motivo_glosa_descricao'], dropna=False, as_index=False)
+           .agg(valor_glosa=('valor_glosa','sum'),
+                itens=('codigo_procedimento','count')))
+
+    # APLICAÇÃO DA CATEGORIA AQUI:
+    mot['categoria'] = mot['motivo_glosa_codigo'].apply(categorizar_motivo_ans)
     
-    # 4. Cálculo de representatividade
-    total_geral_glosado = mot['valor_glosa'].sum()
-    mot['share_glosa_pct'] = (mot['valor_glosa'] / total_geral_glosado) * 100
+    # Cálculo de porcentagem sobre o total glosado
+    total_glosa = mot['valor_glosa'].sum()
+    mot['glosa_pct'] = (mot['valor_glosa'] / total_glosa) * 100 if total_glosa > 0 else 0
     
     return mot.sort_values('valor_glosa', ascending=False)
 
