@@ -39,7 +39,7 @@ try:
 except Exception:
     pass
 
-# ========= FUNÇÕES DE AUTOMAÇÃO AMHP =========
+# ========= FUNÇÕES DE AUTOMAÇÃO AMHP (DEFINIÇÃO GLOBAL) =========
 
 def configurar_driver():
     opts = Options()
@@ -57,80 +57,69 @@ def configurar_driver():
 
 def js_safe_click(driver, by, value, timeout=25):
     el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
-    driver.execute_script("arguments[0].scrollIntoView(true);", el)
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+    time.sleep(0.5)
     driver.execute_script("arguments[0].click();", el)
 
-
 def extrair_detalhes_site_amhp(numero_guia):
-    """
-    Extrai detalhes de uma guia específica no portal AMHP utilizando
-    cliques via JavaScript para evitar erros de interceptação e timeout.
-    """
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 30) # Aumentado para 30s para maior estabilidade
+    wait = WebDriverWait(driver, 30)
     dados = {}
-    
     try:
-        # 1. Login e Acesso Inicial
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
         
-        # Espera o dashboard carregar
         time.sleep(5)
-        if len(driver.window_handles) > 1: 
-            driver.switch_to.window(driver.window_handles[-1])
+        if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
 
-        # 2. Navegação Segura (Lógica de clique seguro do exportador)
-        # Esperamos o botão 'IrPara' ser de fato clicável
         btn_ir_para = wait.until(EC.element_to_be_clickable((By.ID, "IrPara")))
         driver.execute_script("arguments[0].click();", btn_ir_para)
         
-        # Usando a lógica de clique seguro para o menu
         js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
         js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
-        # 3. Pesquisa e Busca (Lógica Robusta)
         input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
         input_busca.clear()
         input_busca.send_keys(numero_guia)
         
-        # Clique seguro no botão Buscar
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
-        driver.execute_script("arguments[0].scrollIntoView(true);", btn_buscar)
         driver.execute_script("arguments[0].click();", btn_buscar)
         
-        # --- NOVO: Aguarda a guia específica aparecer na tabela de resultados ---
         xpath_guia = f"//a[contains(text(), '{numero_guia}')]"
         link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
         driver.execute_script("arguments[0].click();", link_guia)
         
-        # 4. Captura de Dados (Tela de detalhes da guia)
-        # Aguarda carregar o nome do paciente para confirmar que a tela abriu
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(2) # Pequena pausa para garantir que o JavaScript preencheu os campos
+        time.sleep(2)
 
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
         
-        # 5. Captura da Tabela de Itens
-        try:
-            tabela_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
-            html_tabela = tabela_el.get_attribute('outerHTML')
-            # StringIO é necessário para evitar avisos de depreciação do Pandas
-            df_itens = pd.read_html(io.StringIO(html_tabela))[0]
-            dados['itens'] = df_itens
-        except Exception as e_tab:
-            dados['itens'] = pd.DataFrame([{"Erro": f"Tabela de itens não encontrada: {e_tab}"}])
+        tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        html_tabela = tabela_el.get_attribute('outerHTML')
+        dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
         return dados
-
     except Exception as e:
-        # Se houver erro, retornamos para exibir no st.error do Streamlit
         return {"erro": str(e)}
-    
     finally:
         driver.quit()
+
+@st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
+def modal_amhptiss_site(n_guia):
+    st.write(f"Conectando ao portal para a guia **{n_guia}**...")
+    with st.spinner("Automação Selenium em execução..."):
+        res = extrair_detalhes_site_amhp(n_guia)
+    
+    if "erro" in res:
+        st.error(f"Erro na conexão: {res['erro']}")
+    else:
+        st.subheader(f"👤 Paciente: {res['paciente']}")
+        st.write(f"📅 Data do Atendimento: {res['data']}")
+        st.divider()
+        st.write("**Itens registrados no portal:**")
+        st.dataframe(res['itens'], use_container_width=True)    
         
 # =========================================================
 # Configuração da página (UI)
