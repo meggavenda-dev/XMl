@@ -1742,7 +1742,7 @@ with tab_glosas:
         df_view = df_g.copy()
         if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
             df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
-        if has_pagto && (mes_sel_label := mes_sel_label):
+        if has_pagto and (mes_sel_label := mes_sel_label):
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
         # Série mensal (Pagamento)
