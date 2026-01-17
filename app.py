@@ -30,6 +30,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+from selenium.webdriver import ActionChains
+from selenium.webdriver.common.action_chains import ActionChains as AC
 
 # ========= Secrets/env p/ Selenium =========
 try:
@@ -99,6 +101,81 @@ def js_safe_click(driver, by, value, timeout=30, retries=3, scroll_block='center
                 raise
 
 
+def _switch_to_iframe_that_contains(driver, by, value, timeout=15):
+    """
+    Se o elemento não for encontrado no documento atual, tenta iterar por iframes
+    e troca para o primeiro que contiver o elemento-alvo.
+    """
+    try:
+        driver.find_element(by, value)
+        return  # já estamos no contexto certo
+    except Exception:
+        pass
+
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for idx, fr in enumerate(iframes):
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(fr)
+            driver.find_element(by, value)
+            return  # achou dentro deste frame
+        except Exception:
+            continue
+
+    # Se não encontrou em iframes, volta ao default
+    driver.switch_to.default_content()
+
+
+def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True):
+    """
+    Tenta digitar de forma robusta em RadTextBox (Telerik):
+    - Scroll + foco + Ctrl+A + Delete + send_keys(texto)
+    - TAB (opcional) para disparar blur/validação
+    - Valida value; se falhar, seta via JS + dispara eventos 'input/change/blur'
+    """
+    el = wait.until(EC.visibility_of_element_located(locator))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", el)
+
+    # Limpeza agressiva: Ctrl+A + Delete
+    try:
+        el.send_keys(Keys.CONTROL, 'a')
+        el.send_keys(Keys.DELETE)
+    except Exception:
+        pass
+
+    # Digita
+    el.send_keys(str(texto).strip())
+
+    # TAB para disparar blur/validadores do Telerik
+    if must_tab:
+        el.send_keys(Keys.TAB)
+
+    # Valida se colou
+    time.sleep(0.2)
+    val = el.get_attribute("value") or ""
+    if val.strip() == str(texto).strip():
+        return True
+
+    # Fallback por JS: set value + dispara eventos
+    try:
+        driver.execute_script("""
+            const el = arguments[0], v = arguments[1];
+            el.value = v;
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            el.dispatchEvent(new Event('blur', {bubbles:true}));
+        """, el, str(texto).strip())
+        time.sleep(0.2)
+        val2 = el.get_attribute("value") or ""
+        return val2.strip() == str(texto).strip()
+    except Exception:
+        return False
+
+
 def _entrar_amhptiss(driver, wait, wait_after=10):
     """
     Entra no módulo AMHPTISS/TISS com fallback case-insensitive,
@@ -146,7 +223,12 @@ def _ir_para_atendimentos(driver, wait):
     js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
     # Aguarda o carregamento inicial da página (grid presente)
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+    # Caso esteja em iframe, tenta localizar lá também
+    try:
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+    except Exception:
+        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=10)
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
 
 def extrair_detalhes_site_amhp(numero_guia):
@@ -165,44 +247,56 @@ def extrair_detalhes_site_amhp(numero_guia):
         # 3) Menu -> Atendimentos
         _ir_para_atendimentos(driver, wait)
 
-        # 4) Localiza o campo de busca (Atendimento OU Guia)
-        input_ids = [
-            "ctl00_MainContent_rtbNumeroAtendimento",  # mais comum
-            "ctl00_MainContent_rtbNumeroGuia",         # fallback
+        # 4) Localiza o campo de busca (Atendimento OU Guia) — com suporte a iframe
+        valor_busca = str(numero_guia).strip()
+
+        # Garante contexto: tenta achar o input no doc atual; se não, varre iframes
+        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_rtbNumeroAtendimento", timeout=10)
+
+        # Tenta por IDs conhecidos
+        input_locators = [
+            (By.ID, "ctl00_MainContent_rtbNumeroAtendimento"),  # mais comum
+            (By.ID, "ctl00_MainContent_rtbNumeroGuia"),         # fallback
         ]
-        input_busca = None
-        for cand in input_ids:
+        input_used = None
+        for loc in input_locators:
             try:
-                input_busca = wait.until(EC.visibility_of_element_located((By.ID, cand)))
+                _switch_to_iframe_that_contains(driver, loc[0], loc[1], timeout=10)
+                WebDriverWait(driver, 10).until(EC.visibility_of_element_located(loc))
+                input_used = loc
                 break
             except Exception:
                 continue
-        if not input_busca:
-            raise RuntimeError("Campo de busca não localizado (Atendimento/Guia).")
 
-        valor_busca = str(numero_guia).strip()
-        input_busca.clear()
-        input_busca.send_keys(valor_busca)
+        if not input_used:
+            raise RuntimeError("Campo de busca não localizado (Atendimento/Guia) — verifique o dump HTML (amhp_dump.html).")
 
-        # 5) Guardar referência da grid antes da busca (para staleness)
+        # 5) Digita robustamente na RadTextBox
+        ok = _force_type_in_radinput(driver, wait, input_used, valor_busca, must_tab=True)
+        if not ok:
+            raise RuntimeError("Falha ao definir o valor no campo de busca (RadInput).")
+
+        # 6) Guardar referência da grid antes da busca (para staleness)
         old_table = None
         try:
             old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         except Exception:
             pass
 
-        # 6) Clicar Buscar
+        # 7) Clicar Buscar (o botão pode estar em outro contexto)
+        driver.switch_to.default_content()
+        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_btnBuscar_input", timeout=5)
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # 7) Sincronização pós-busca (AJAX)
-        if old_table is not None:
-            try:
+        # 8) Sincronização pós-busca (AJAX): staleness + loader invisível
+        try:
+            if old_table is not None:
                 WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-        # Espera loaders típicos de RadAjax/Telerik sumirem (se existirem)
         try:
             WebDriverWait(driver, 30).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
@@ -210,9 +304,12 @@ def extrair_detalhes_site_amhp(numero_guia):
         except Exception:
             pass
 
+        # Certifica que estamos no contexto certo para achar a nova grid
+        driver.switch_to.default_content()
+        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=10)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
-        # 8) Encontrar e clicar a guia
+        # 9) Encontrar e clicar a guia
         num = valor_busca
 
         # (a) tenta pelo próprio <a> cujo texto contém o número (normalizado)
@@ -222,7 +319,7 @@ def extrair_detalhes_site_amhp(numero_guia):
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
             driver.execute_script("arguments[0].click();", link_guia)
         except TimeoutException:
-            # (b) fallback: acha a TR cuja TD contenha o número e clica no primeiro link da linha
+            # (b) fallback: encontra a TR cuja TD contenha o número e clica no primeiro link da linha
             row_xpath = f"//table[contains(@class,'rgMasterTable')]//tr[.//td[contains(normalize-space(.), '{num}')]]"
             linha = wait.until(EC.presence_of_element_located((By.XPATH, row_xpath)))
             try:
@@ -233,13 +330,20 @@ def extrair_detalhes_site_amhp(numero_guia):
                 # (c) último recurso: clicar na linha toda (se for clicável)
                 driver.execute_script("arguments[0].click();", linha)
 
-        # 9) Coleta final dos dados
+        # 10) Coleta final dos dados (garante contexto correto)
+        driver.switch_to.default_content()
+        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=10)
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(1.5)  # pequeno respiro pós-render
+        time.sleep(1.2)  # pequeno respiro pós-render
 
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
 
+        # A tabela de itens costuma estar na mesma página
+        try:
+            _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=5)
+        except Exception:
+            pass
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         html_tabela = tabela_el.get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
@@ -628,7 +732,7 @@ _COLMAPS = {
     "lote": [r"\blote\b"],
     "competencia": [r"compet|m[eê]s|refer"],
     "guia_prest": [r"\bguia\b"],
-    "guia_oper": [r"\bguia\b"],
+    "guia_oper": [r"^\bguia\b"],
     "cod_proc": [r"cod.*proced|proced.*cod|tuss"],
     "desc_proc": [r"descr"],
     "qtd_apres": [r"quant|qtd"],
