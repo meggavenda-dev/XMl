@@ -2150,7 +2150,7 @@ with tab_glosas:
             if has_pagto:
                 base_m = df_view[df_view["_is_glosa"] == True].copy()
                 if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as index=False)
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
                                       .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
                                            Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
                 else:
