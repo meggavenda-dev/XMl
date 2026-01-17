@@ -19,10 +19,103 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+import time
+import shutil
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+
+# ========= Secrets/env p/ Selenium =========
+try:
+    chrome_bin_secret = st.secrets.get("env", {}).get("CHROME_BINARY", None)
+    driver_bin_secret = st.secrets.get("env", {}).get("CHROMEDRIVER_BINARY", None)
+    if chrome_bin_secret: os.environ["CHROME_BINARY"] = chrome_bin_secret
+    if driver_bin_secret: os.environ["CHROMEDRIVER_BINARY"] = driver_bin_secret
+except Exception:
+    pass
+
 # # (Opcional) Limpar cache após atualização de código (execute 1x e comente):
 # try: st.cache_data.clear()
 # except: pass
+# ========= FUNÇÕES DE AUTOMAÇÃO AMHP =========
 
+def configurar_driver():
+    opts = Options()
+    chrome_binary = os.environ.get("CHROME_BINARY", "/usr/bin/chromium")
+    driver_binary = os.environ.get("CHROMEDRIVER_BINARY", "/usr/bin/chromedriver")
+    if os.path.exists(chrome_binary): opts.binary_location = chrome_binary
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    if os.path.exists(driver_binary):
+        service = Service(executable_path=driver_binary)
+        return webdriver.Chrome(service=service, options=opts)
+    return webdriver.Chrome(options=opts)
+
+def js_safe_click(driver, by, value, timeout=25):
+    el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
+    driver.execute_script("arguments[0].scrollIntoView(true);", el)
+    driver.execute_script("arguments[0].click();", el)
+
+def extrair_detalhes_site_amhp(numero_guia):
+    driver = configurar_driver()
+    wait = WebDriverWait(driver, 25)
+    dados = {}
+    try:
+        # 1. Login
+        driver.get("https://portal.amhp.com.br/")
+        wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
+        driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
+        time.sleep(5)
+        if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
+
+        # 2. Navegação
+        driver.execute_script("document.getElementById('IrPara').click();")
+        js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
+        js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
+
+        # 3. Pesquisa (Campo que você mapeou)
+        input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
+        input_busca.clear()
+        input_busca.send_keys(numero_guia)
+        driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input").click()
+        
+        # 4. Entrar na Guia
+        js_safe_click(driver, By.XPATH, f"//a[contains(text(), '{numero_guia}')]")
+        time.sleep(3)
+
+        # 5. Captura
+        dados['paciente'] = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario"))).get_attribute("value")
+        dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
+        
+        tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        df_itens = pd.read_html(io.StringIO(tabela_el.get_attribute('outerHTML')))[0]
+        
+        # Limpeza para Código, Descrição, Valor
+        # (Adapte os nomes das colunas conforme aparecem no seu site)
+        dados['itens'] = df_itens
+        return dados
+    except Exception as e:
+        return {"erro": str(e)}
+    finally:
+        driver.quit()
+
+@st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
+def modal_amhptiss_site(n_guia):
+    st.write(f"Pesquisando dados da guia **{n_guia}** no site...")
+    res = extrair_detalhes_site_amhp(n_guia)
+    if "erro" in res:
+        st.error(f"Erro na conexão: {res['erro']}")
+    else:
+        st.subheader(f"Paciente: {res['paciente']}")
+        st.write(f"Data: {res['data']}")
+        st.dataframe(res['itens'], use_container_width=True)
 # =========================================================
 # Configuração da página (UI)
 # =========================================================
@@ -1369,9 +1462,20 @@ with tab_glosas:
                     except Exception:
                         st.write("-")
                 with col_btn:
-                    if st.button("🔎 Ver guias", key=f"ver_guias_{i}"):
+                    # Botão original para ver guias no Excel
+                    if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
                         st.session_state["glosas_item_modal"] = str(row.get("Descrição do Item", ""))
                         st.rerun()
+                    
+                    # NOVO: Botão para pesquisar a guia no site
+                    # Pegamos a primeira guia AMHPTISS da lista para este item
+                    item_nome = row.get("Descrição do Item", "")
+                    # Busca o número da guia no dataframe filtrado
+                    df_guia_temp = df_view[df_view[colmap["descricao"]] == item_nome]
+                    guia_para_site = str(df_guia_temp[colmap["amhptiss"]].iloc[0]).strip()
+                    
+                    if st.button("🌐 No Site", key=f"site_{i}"):
+                        modal_amhptiss_site(guia_para_site)
 
             # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
             def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
