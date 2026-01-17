@@ -41,19 +41,44 @@ except Exception:
 
 # ========= FUNÇÕES DE AUTOMAÇÃO AMHP (DEFINIÇÃO GLOBAL) =========
 
+
 def configurar_driver():
     opts = Options()
     chrome_binary = os.environ.get("CHROME_BINARY", "/usr/bin/chromium")
     driver_binary = os.environ.get("CHROMEDRIVER_BINARY", "/usr/bin/chromedriver")
-    if os.path.exists(chrome_binary): opts.binary_location = chrome_binary
+
+    if os.path.exists(chrome_binary):
+        opts.binary_location = chrome_binary
+
+    # Flags que ajudam MUITO na estabilidade em ambientes headless
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
+
+    # (opcional) prefs - mesmo sem download aqui, eles deixam o perfil consistente
+    prefs = {
+        "download.default_directory": os.getcwd(),
+        "download.prompt_for_download": False,
+        "plugins.always_open_pdf_externally": True,
+    }
+    try:
+        opts.add_experimental_option("prefs", prefs)
+    except Exception:
+        pass
+
     if os.path.exists(driver_binary):
         service = Service(executable_path=driver_binary)
-        return webdriver.Chrome(service=service, options=opts)
-    return webdriver.Chrome(options=opts)
+        driver = webdriver.Chrome(service=service, options=opts)
+    else:
+        driver = webdriver.Chrome(options=opts)
+
+    # Timeouts "longos", o AMHP costuma demorar
+    driver.set_page_load_timeout(180)
+    driver.set_script_timeout(180)
+    return driver
+
 
 def js_safe_click(driver, by, value, timeout=30, retries=3):
     """Executa um clique via JS com múltiplas tentativas para evitar o erro de Stacktrace."""
