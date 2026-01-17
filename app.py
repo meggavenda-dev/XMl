@@ -196,6 +196,72 @@ def wait_page_ready(driver, timeout=30):
         lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
+# =========================================================
+# Helpers NOVOS — iframe/Telerik/AJAX
+# =========================================================
+def switch_to_rd_iframe(driver, timeout=30):
+    """Garante que estamos dentro do iframe principal (rd_tmgr) do Telerik."""
+    driver.switch_to.default_content()
+    WebDriverWait(driver, timeout).until(
+        EC.frame_to_be_available_and_switch_to_it((By.ID, "rd_tmgr"))
+    )
+
+def wait_radajax_idle(driver, timeout=40):
+    """Espera o overlay/loader do Telerik desaparecer (.rgLoading/.raDiv)."""
+    # Tenta ficar no iframe principal (se existir)
+    try:
+        switch_to_rd_iframe(driver, timeout=10)
+    except Exception:
+        driver.switch_to.default_content()
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script(
+            "return !document.querySelector('.rgLoading, .raDiv, .RadAjax .raDiv');"
+        )
+    )
+
+def abrir_painel_localizar(driver, wait, timeout=30):
+    """
+    Clica em 'Localizar' (ou aciona o atalho Ctrl+Shift+L) e espera aparecer algum campo de filtro.
+    """
+    switch_to_rd_iframe(driver)
+    wait_radajax_idle(driver, timeout=timeout)
+
+    # Botão Localizar (variações)
+    candidatos = [
+        (By.ID, "ctl00_MainContent_btnLocalizar_input"),
+        (By.XPATH, "//span[normalize-space()='Localizar']/ancestor::*[self::a or self::button][1]"),
+        (By.XPATH, "//*[self::a or self::button][.//span[normalize-space()='Localizar'] or contains(., 'Localizar')]"),
+    ]
+    for by, val in candidatos:
+        els = driver.find_elements(by, val)
+        if els:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", els[0])
+            driver.execute_script("arguments[0].click();", els[0])
+            break
+    else:
+        # Atalho caso o botão não esteja visível
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.send_keys(Keys.CONTROL, Keys.SHIFT, 'l')
+
+    # Espera surgir algum input de filtro
+    possiveis = [
+        (By.ID, "ctl00_MainContent_rtbNumeroAtendimento"),
+        (By.ID, "ctl00_MainContent_rtbNumeroGuia"),
+        (By.XPATH, "//input[contains(@id,'rtbNumero')]"),
+        (By.XPATH, "//*[self::label or self::span][contains(.,'Nº') or contains(.,'Guia') or contains(.,'Atendimento')]/following::input[1]"),
+    ]
+    ok = False
+    for by, val in possiveis:
+        try:
+            el = WebDriverWait(driver, timeout).until(EC.visibility_of_element_located((by, val)))
+            if el.is_displayed():
+                ok = True
+                break
+        except Exception:
+            pass
+
+    if not ok:
+        raise TimeoutException("Painel de Localizar não abriu (nenhum campo de filtro visível).")
 
 # >>> Helper crítico (RadInput + ClientState) <<<
 def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_tab: bool = True) -> tuple[bool, str, str]:
@@ -371,61 +437,55 @@ def extrair_detalhes_site_amhp(numero_guia):
             except Exception:
                 pass
 
-        # 4) Campo de busca (ficar no MESMO iframe até clicar Buscar)
+        # 4) Abrir painel "Localizar", entrar no iframe e localizar o campo
         driver.switch_to.default_content()
+        abrir_painel_localizar(driver, wait, timeout=40)
+        wait_radajax_idle(driver, timeout=40)
+
+        switch_to_rd_iframe(driver)
+
         valor_solicitado = re.sub(r"\D+", "", str(numero_guia).strip())
         input_ids = [
             "ctl00_MainContent_rtbNumeroAtendimento",
             "ctl00_MainContent_rtbNumeroGuia",
         ]
         campo_id = None
-        last_err = None
 
-        for attempt in range(2):
+        # Tenta IDs diretos
+        for iid in input_ids:
             try:
-                dump_iframes(driver, out_path=f"iframes_dump_attempt{attempt}.txt")
-
-                # Tenta no DOM atual
-                for iid in input_ids:
-                    try:
-                        el = driver.find_element(By.ID, iid)
-                        if el.is_displayed():
-                            campo_id = iid
-                            break
-                    except Exception:
-                        pass
-                if campo_id:
+                el = driver.find_element(By.ID, iid)
+                if el.is_displayed():
+                    campo_id = iid
                     break
+            except Exception:
+                pass
 
-                # Tenta em iframes
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                for fr in iframes:
-                    try:
-                        driver.switch_to.default_content()
-                        driver.switch_to.frame(fr)
-                        for iid in input_ids:
-                            try:
-                                el = driver.find_element(By.ID, iid)
-                                if el.is_displayed():
-                                    campo_id = iid
-                                    break
-                            except Exception:
-                                pass
-                        if campo_id:
-                            break
-                    except Exception as e:
-                        last_err = e
-                if campo_id:
-                    break
+        # Fallback por XPath
+        if not campo_id:
+            try:
+                el = driver.find_element(By.XPATH, "//input[contains(@id,'rtbNumero')]")
+                campo_id = el.get_attribute("id")
+            except Exception:
+                pass
 
-                driver.switch_to.default_content()
-                driver.save_screenshot(f"debug_no_input_attempt{attempt}.png")
-                time.sleep(1.0)
-            except Exception as e:
-                last_err = e
+        # Último recurso: input após rótulos “Guia/Atendimento”
+        if not campo_id:
+            try:
+                el = driver.find_element(
+                    By.XPATH,
+                    "((//*[self::label or self::span][contains(.,'Guia') or contains(.,'Atendimento') or contains(.,'AMHPTISS')])[1]/following::input)[1]"
+                )
+                campo_id = el.get_attribute("id")
+            except Exception:
+                pass
 
         if not campo_id:
-            raise RuntimeError(f"Campo de busca não localizado. Checar iframes_dump_attempt*.txt e debug_no_input_attempt*.png. Último erro: {last_err}")
+            # Evidências e erro
+            driver.switch_to.default_content()
+            driver.save_screenshot("debug_no_input.png")
+            dump_iframes(driver, out_path="iframes_dump_no_input.txt")
+            raise RuntimeError("Campo de busca não localizado após abrir Localizar. Veja debug_no_input.png e iframes_dump_no_input.txt.")
 
         # 5) PREENCHIMENTO RADINPUT + CLIENTSTATE
         ok_set, val_attr2, client_validation = set_radinput_with_clientstate(
@@ -439,15 +499,16 @@ def extrair_detalhes_site_amhp(numero_guia):
                 f"RadInput não aceitou o valor solicitado. value='{val_attr2}', ClientState.validationText='{client_validation}'"
             )
 
-        # 6) Buscar (no MESMO iframe, se possível)
+        # 6) Buscar (permanecendo no iframe e aguardando AJAX)
         btn_buscar_id = "ctl00_MainContent_btnBuscar_input"
         try:
             btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
         except Exception:
             driver.switch_to.default_content()
-            _switch_to_iframe_that_contains(driver, By.ID, btn_buscar_id, timeout=8)
+            switch_to_rd_iframe(driver)
             btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
 
+        # Guarda a tabela antiga, se existir
         try:
             old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         except Exception:
@@ -456,25 +517,20 @@ def extrair_detalhes_site_amhp(numero_guia):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # 7) Sincronização pós-busca
+        # Espera staleness e AJAX finalizar
         if old_table is not None:
             try:
-                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
+                WebDriverWait(driver, 40).until(EC.staleness_of(old_table))
             except Exception:
                 pass
 
-        try:
-            WebDriverWait(driver, 40).until(
-                EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
-            )
-        except Exception:
-            pass
+        wait_radajax_idle(driver, timeout=50)
 
         driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=15)
+        switch_to_rd_iframe(driver)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
-        # 8) Abrir a guia no resultado
+        # 8) Abrir a guia no resultado (clicando no link que contém o número)
         link_guia = wait.until(EC.element_to_be_clickable((
             By.XPATH, f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{valor_solicitado}')]"
         )))
