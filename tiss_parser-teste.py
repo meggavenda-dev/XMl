@@ -231,9 +231,11 @@ def _ir_para_atendimentos(driver, wait):
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
 
+# Modifique a função extrair_detalhes_site_amhp no seu código original por esta:
+
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 50)  # aumentado para robustez
+    wait = WebDriverWait(driver, 50)
     dados = {}
     try:
         # 1) Login
@@ -241,109 +243,70 @@ def extrair_detalhes_site_amhp(numero_guia):
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        # 2) Entrar AMHPTISS (com fallback) e limpar overlays
+        # 2) Entrar AMHPTISS e limpar overlays
         _entrar_amhptiss(driver, wait, wait_after=10)
 
-        # 3) Menu -> Atendimentos
+        # 3) Navegar até a tela de Atendimentos
         _ir_para_atendimentos(driver, wait)
 
-        # 4) Localiza o campo de busca (Atendimento OU Guia) — com suporte a iframe
-        valor_busca = str(numero_guia).strip()
-
-        # Garante contexto: tenta achar o input no doc atual; se não, varre iframes
-        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_rtbNumeroAtendimento", timeout=10)
-
-        # Tenta por IDs conhecidos
-        input_locators = [
-            (By.ID, "ctl00_MainContent_rtbNumeroAtendimento"),  # mais comum
-            (By.ID, "ctl00_MainContent_rtbNumeroGuia"),         # fallback
-        ]
-        input_used = None
-        for loc in input_locators:
-            try:
-                _switch_to_iframe_that_contains(driver, loc[0], loc[1], timeout=10)
-                WebDriverWait(driver, 10).until(EC.visibility_of_element_located(loc))
-                input_used = loc
-                break
-            except Exception:
-                continue
-
-        if not input_used:
-            raise RuntimeError("Campo de busca não localizado (Atendimento/Guia) — verifique o dump HTML (amhp_dump.html).")
-
-        # 5) Digita robustamente na RadTextBox
-        ok = _force_type_in_radinput(driver, wait, input_used, valor_busca, must_tab=True)
-        if not ok:
-            raise RuntimeError("Falha ao definir o valor no campo de busca (RadInput).")
-
-        # 6) Guardar referência da grid antes da busca (para staleness)
-        old_table = None
-        try:
-            old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
-        except Exception:
-            pass
-
-        # 7) Clicar Buscar (o botão pode estar em outro contexto)
+        # 4) LOCALIZAÇÃO DO CAMPO (CRÍTICO)
+        # Primeiro, garantimos que voltamos para o topo e procuramos o frame correto
         driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_btnBuscar_input", timeout=5)
-        btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
+        
+        # Tentamos encontrar o campo de busca. Se não estiver no topo, varremos iframes.
+        input_id = "ctl00_MainContent_rtbNumeroAtendimento"
+        _switch_to_iframe_that_contains(driver, By.ID, input_id, timeout=15)
+        
+        try:
+            campo_busca = wait.until(EC.element_to_be_clickable((By.ID, input_id)))
+        except TimeoutException:
+            # Fallback para o ID secundário se o principal falhar
+            input_id = "ctl00_MainContent_rtbNumeroGuia"
+            _switch_to_iframe_that_contains(driver, By.ID, input_id, timeout=5)
+            campo_busca = wait.until(EC.element_to_be_clickable((By.ID, input_id)))
+
+        # 5) DIGITAÇÃO ROBUSTA
+        # Em vez de apenas send_keys, usamos uma técnica que limpa o campo de verdade
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo_busca)
+        time.sleep(0.5)
+        campo_busca.click()
+        campo_busca.send_keys(Keys.CONTROL + "a")
+        campo_busca.send_keys(Keys.DELETE)
+        time.sleep(0.2)
+        campo_busca.send_keys(str(numero_guia).strip())
+        campo_busca.send_keys(Keys.TAB) # Dispara a validação do campo no portal
+
+        # 6) CLIQUE NO BOTÃO BUSCAR
+        # O botão buscar costuma estar no mesmo frame que o input
+        btn_buscar_id = "ctl00_MainContent_btnBuscar_input"
+        btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
+        
+        # Guardamos a referência da tabela antiga para saber quando os dados mudarem
+        old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # 8) Sincronização pós-busca (AJAX): staleness + loader invisível
+        # 7) AGUARDAR ATUALIZAÇÃO (AJAX)
+        # Esperamos a tabela antiga ficar "obsoleta" ou o loader sumir
         try:
-            if old_table is not None:
-                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
-        except Exception:
-            pass
+            WebDriverWait(driver, 20).until(EC.staleness_of(old_table))
+            WebDriverWait(driver, 20).until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading")))
+        except:
+            time.sleep(3) # Fallback de tempo se a verificação de staleness falhar
 
-        try:
-            WebDriverWait(driver, 30).until(
-                EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
-            )
-        except Exception:
-            pass
+        # 8) CLICAR NO LINK DA GUIA RESULTANTE
+        xpath_guia = f"//a[contains(text(), '{str(numero_guia).strip()}')]"
+        link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
+        driver.execute_script("arguments[0].click();", link_guia)
 
-        # Certifica que estamos no contexto certo para achar a nova grid
-        driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=10)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
-
-        # 9) Encontrar e clicar a guia
-        num = valor_busca
-
-        # (a) tenta pelo próprio <a> cujo texto contém o número (normalizado)
-        xpath_link = f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{num}')]"
-        try:
-            link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_link)))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
-            driver.execute_script("arguments[0].click();", link_guia)
-        except TimeoutException:
-            # (b) fallback: encontra a TR cuja TD contenha o número e clica no primeiro link da linha
-            row_xpath = f"//table[contains(@class,'rgMasterTable')]//tr[.//td[contains(normalize-space(.), '{num}')]]"
-            linha = wait.until(EC.presence_of_element_located((By.XPATH, row_xpath)))
-            try:
-                link_na_linha = linha.find_element(By.XPATH, ".//a")
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_na_linha)
-                driver.execute_script("arguments[0].click();", link_na_linha)
-            except Exception:
-                # (c) último recurso: clicar na linha toda (se for clicável)
-                driver.execute_script("arguments[0].click();", linha)
-
-        # 10) Coleta final dos dados (garante contexto correto)
-        driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=10)
+        # 9) COLETA DOS DADOS
+        # Após clicar, a página carrega os detalhes (pode haver outro frame aqui)
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(1.2)  # pequeno respiro pós-render
-
+        
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
-
-        # A tabela de itens costuma estar na mesma página
-        try:
-            _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=5)
-        except Exception:
-            pass
+        
+        # Extração da tabela de itens
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         html_tabela = tabela_el.get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
@@ -351,23 +314,10 @@ def extrair_detalhes_site_amhp(numero_guia):
         return dados
 
     except Exception as e:
-        # Dump de evidências para depuração
-        try:
-            driver.save_screenshot("erro_conexao_portal.png")
-        except Exception:
-            pass
-        try:
-            page_html = driver.page_source
-            with open("amhp_dump.html", "w", encoding="utf-8") as f:
-                f.write(page_html)
-        except Exception:
-            pass
-        return {"erro": f"{e.__class__.__name__}: {e}"}
+        driver.save_screenshot("erro_busca_guia.png")
+        return {"erro": f"Falha na busca da guia: {str(e)}"}
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        driver.quit()
 
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
