@@ -55,17 +55,29 @@ def configurar_driver():
         return webdriver.Chrome(service=service, options=opts)
     return webdriver.Chrome(options=opts)
 
-def js_safe_click(driver, by, value, timeout=25):
-    el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
-    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-    time.sleep(0.5)
-    driver.execute_script("arguments[0].click();", el)
+def js_safe_click(driver, by, value, timeout=30, retries=3):
+    """Executa um clique via JS com múltiplas tentativas para evitar o erro de Stacktrace."""
+    for attempt in range(retries):
+        try:
+            el = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((by, value))
+            )
+            # Rola para o centro para garantir que o JS encontre o elemento
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", el)
+            return
+        except (TimeoutException, ElementClickInterceptedException) as e:
+            if attempt == retries - 1:
+                raise e
+            time.sleep(1.5)
 
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
     wait = WebDriverWait(driver, 30)
     dados = {}
     try:
+        # 1. Login
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
@@ -73,12 +85,14 @@ def extrair_detalhes_site_amhp(numero_guia):
         time.sleep(5)
         if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
 
+        # 2. Navegação
         btn_ir_para = wait.until(EC.element_to_be_clickable((By.ID, "IrPara")))
         driver.execute_script("arguments[0].click();", btn_ir_para)
         
         js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
         js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
+        # 3. Pesquisa e Sincronização (Evita o erro de Stacktrace)
         input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
         input_busca.clear()
         input_busca.send_keys(numero_guia)
@@ -86,10 +100,15 @@ def extrair_detalhes_site_amhp(numero_guia):
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
         driver.execute_script("arguments[0].click();", btn_buscar)
         
+        # AGUARDA A TABELA RECARREGAR (A parte mais importante)
+        time.sleep(4) 
+        
+        # Busca o link específico da guia nos resultados
         xpath_guia = f"//a[contains(text(), '{numero_guia}')]"
-        link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
+        link_guia = wait.until(EC.visibility_of_element_located((By.XPATH, xpath_guia)))
         driver.execute_script("arguments[0].click();", link_guia)
         
+        # 4. Captura
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
         time.sleep(2)
 
@@ -102,6 +121,11 @@ def extrair_detalhes_site_amhp(numero_guia):
 
         return dados
     except Exception as e:
+        # Tira print para log em caso de erro
+        try:
+            driver.save_screenshot("erro_conexao_portal.png")
+        except:
+            pass
         return {"erro": str(e)}
     finally:
         driver.quit()
