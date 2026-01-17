@@ -61,64 +61,76 @@ def js_safe_click(driver, by, value, timeout=25):
     driver.execute_script("arguments[0].click();", el)
 
 def extrair_detalhes_site_amhp(numero_guia):
+    """
+    Extrai detalhes de uma guia específica no portal AMHP utilizando
+    cliques via JavaScript para evitar erros de interceptação.
+    """
     driver = configurar_driver()
     wait = WebDriverWait(driver, 25)
     dados = {}
+    
     try:
-        # 1. Login
+        # 1. Login e Acesso Inicial
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
         
-        # Espera carregar e lida com janelas
+        # Tempo para processar o login e trocar de janela se necessário
         time.sleep(5)
-        if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
+        if len(driver.window_handles) > 1:
+            driver.switch_to.window(driver.window_handles[-1])
 
-        # 2. Navegação (CORRIGIDO: Espera o botão ser clicável para evitar erro de JS null)
+        # 2. Navegação Segura (Implementação JS Safe Click)
+        # Espera o botão 'IrPara' ser clicável em vez de injetar JS direto no null
         btn_ir_para = wait.until(EC.element_to_be_clickable((By.ID, "IrPara")))
-        btn_ir_para.click()
+        driver.execute_script("arguments[0].click();", btn_ir_para)
         
+        # Navega para Atendimentos Realizados
         js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
         js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
-        # 3. Pesquisa
+        # 3. Pesquisa da Guia Selecionada
+        st.write(f"🔍 Localizando guia {numero_guia} no portal...")
         input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
         input_busca.clear()
         input_busca.send_keys(numero_guia)
-        driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input").click()
         
-        # 4. Entrar na Guia
-        js_safe_click(driver, By.XPATH, f"//a[contains(text(), '{numero_guia}')]")
-        time.sleep(3)
+        # Clique Seguro no botão Buscar
+        btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
+        driver.execute_script("arguments[0].scrollIntoView(true);", btn_buscar)
+        driver.execute_script("arguments[0].click();", btn_buscar)
+        
+        # 4. Aguarda a atualização da tabela (Importante para evitar o erro de 'null')
+        # Esperamos o link específico da guia aparecer na tabela de resultados
+        xpath_guia = f"//a[contains(text(), '{numero_guia}')]"
+        link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
+        driver.execute_script("arguments[0].click();", link_guia)
+        
+        # 5. Captura de Dados (Garante que a tela de detalhes carregou)
+        wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
+        time.sleep(2) # Pausa técnica para renderização dos valores nos inputs
 
-        # 5. Captura
-        dados['paciente'] = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario"))).get_attribute("value")
+        dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
         
-        tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
-        df_itens = pd.read_html(io.StringIO(tabela_el.get_attribute('outerHTML')))[0]
-        
-        dados['itens'] = df_itens
+        # Extração da tabela de itens (Procedimentos/Materiais)
+        try:
+            tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+            html_tabela = tabela_el.get_attribute('outerHTML')
+            # Usando StringIO para evitar avisos de depreciação do Pandas
+            df_itens = pd.read_html(io.StringIO(html_tabela))[0]
+            dados['itens'] = df_itens
+        except Exception as e_tab:
+            dados['itens'] = pd.DataFrame([{"Erro": f"Não foi possível ler a tabela: {e_tab}"}])
+
         return dados
+
     except Exception as e:
+        # Em caso de erro, capturamos a mensagem para exibir no Streamlit
         return {"erro": str(e)}
+    
     finally:
         driver.quit()
-
-@st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
-def modal_amhptiss_site(n_guia):
-    st.write(f"Conectando ao portal para a guia **{n_guia}**...")
-    with st.spinner("Automação Selenium em execução..."):
-        res = extrair_detalhes_site_amhp(n_guia)
-    
-    if "erro" in res:
-        st.error(f"Erro na conexão: {res['erro']}")
-    else:
-        st.subheader(f"👤 Paciente: {res['paciente']}")
-        st.write(f"📅 Data do Atendimento: {res['data']}")
-        st.divider()
-        st.write("**Itens registrados no portal:**")
-        st.dataframe(res['itens'], use_container_width=True)
         
 # =========================================================
 # Configuração da página (UI)
