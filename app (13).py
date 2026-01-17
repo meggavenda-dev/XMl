@@ -88,6 +88,22 @@ def _normtxt(s: str) -> str:
 # Persistência de mapeamento (JSON)
 MAP_FILE = "demo_mappings.json"
 
+def categorizar_motivo_ans(codigo: str) -> str:
+    codigo = str(codigo).strip()
+    # Mapeamento simplificado baseado na TISS/ANS
+    # 1000: Glosas Administrativas / Cadastro
+    if codigo in ['1001', '1002', '1003', '1006', '1009']: return "Cadastro/Elegibilidade"
+    # 1200: Autorização
+    if codigo in ['1201', '1202', '1205', '1209']: return "Autorização/SADT"
+    # 1800: Valores / Tabela
+    if codigo in ['1801', '1802', '1805', '1806']: return "Tabela/Preços"
+    # 2000+: Auditoria Médica e Técnica
+    if codigo.startswith('20') or codigo.startswith('22'): return "Auditoria Médica/Técnica"
+    # 2500: Documentação
+    if codigo in ['2501', '2505', '2509']: return "Documentação/Físico"
+    
+    return "Outros/Administrativa"
+
 def load_demo_mappings() -> dict:
     if os.path.exists(MAP_FILE):
         try:
@@ -695,34 +711,57 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     )
     return grp.sort_values('competencia')
 
-def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 500.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 0.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
     base = df_conc.copy()
     if base.empty:
         return base, base
+        
     grp = (base.groupby(['codigo_procedimento','descricao_procedimento'], dropna=False, as_index=False)
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_glosa=('valor_glosa','sum'),
                 valor_pago=('valor_pago','sum'),
-                itens=('arquivo','count')))
-    grp['glosa_pct'] = grp.apply(
-        lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
-    )
-    top_valor = grp.sort_values('valor_glosa', ascending=False).head(topn)
-    top_pct   = grp[grp['valor_apresentado']>=min_apresentado].sort_values('glosa_pct', ascending=False).head(topn)
+                qtd_glosada=('valor_glosa', lambda x: (x > 0).sum()))) # Conta quantas vezes houve glosa
+
+    # FILTRO CRÍTICO: Manter apenas o que de fato teve glosa
+    grp_com_glosa = grp[grp['valor_glosa'] > 0].copy()
+    
+    if grp_com_glosa.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    grp_com_glosa['glosa_pct'] = (grp_com_glosa['valor_glosa'] / grp_com_glosa['valor_apresentado']) * 100
+    
+    # Rankings reais
+    top_valor = grp_com_glosa.sort_values('valor_glosa', ascending=False).head(topn)
+    top_pct = grp_com_glosa[grp_com_glosa['valor_apresentado'] >= min_apresentado].sort_values('glosa_pct', ascending=False).head(topn)
+    
     return top_valor, top_pct
 
 def motivos_glosa(df_conc: pd.DataFrame, competencia: Optional[str] = None) -> pd.DataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
+        
+    # FILTRO: Apenas o que foi glosado de fato
+    base = base[base['valor_glosa'] > 0]
+    
     if competencia and 'competencia' in base.columns:
         base = base[base['competencia'] == competencia]
+    
+    if base.empty: return pd.DataFrame()
+
+    # Agrupamento inicial
     mot = (base.groupby(['motivo_glosa_codigo','motivo_glosa_descricao'], dropna=False, as_index=False)
            .agg(valor_glosa=('valor_glosa','sum'),
-                valor_apresentado=('valor_apresentado','sum'),
                 itens=('codigo_procedimento','count')))
-    mot['glosa_pct'] = mot.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
-    return mot.sort_values(['valor_glosa','glosa_pct'], ascending=[False, False])
+
+    # APLICAÇÃO DA CATEGORIA AQUI:
+    mot['categoria'] = mot['motivo_glosa_codigo'].apply(categorizar_motivo_ans)
+    
+    # Cálculo de porcentagem sobre o total glosado
+    total_glosa = mot['valor_glosa'].sum()
+    mot['glosa_pct'] = (mot['valor_glosa'] / total_glosa) * 100 if total_glosa > 0 else 0
+    
+    return mot.sort_values('valor_glosa', ascending=False)
 
 def outliers_por_procedimento(df_conc: pd.DataFrame, k: float = 1.5) -> pd.DataFrame:
     base = df_conc[['codigo_procedimento','descricao_procedimento','valor_apresentado']].dropna().copy()
