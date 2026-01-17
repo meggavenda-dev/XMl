@@ -97,63 +97,150 @@ def js_safe_click(driver, by, value, timeout=30, retries=3):
                 raise e
             time.sleep(1.5)
 
+
+def _entrar_amhptiss(driver, wait, wait_after=8):
+    """
+    Após login, entra no módulo AMHPTISS (ou TISS) e troca para a nova aba/janela.
+    Também remove overlays/modais que atrapalham clique.
+    """
+    # Tenta clicar no botão/entrada para abrir o módulo (varia de ambiente)
+    try:
+        btn_tiss = WebDriverWait(driver, 30).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'AMHPTISS')]"))
+        )
+        driver.execute_script("arguments[0].click();", btn_tiss)
+    except Exception:
+        # Fallback: qualquer elemento que contenha “TISS”
+        elems = driver.find_elements(
+            By.XPATH,
+            "//*[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TISS')]"
+        )
+        if elems:
+            driver.execute_script("arguments[0].click();", elems[0])
+        else:
+            # em alguns perfis já cai direto no AMHPTISS; segue...
+            pass
+
+    time.sleep(wait_after)
+    if len(driver.window_handles) > 1:
+        driver.switch_to.window(driver.window_handles[-1])
+
+    # Remove overlays/chat/modais informativos que bloqueiam cliques
+    try:
+        driver.execute_script("""
+            const avisos = document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container');
+            avisos.forEach(el => el.remove());
+        """)
+    except Exception:
+        pass
+
+
+def _ir_para_atendimentos(driver, wait):
+    """
+    A partir do AMHPTISS, abre o menu 'IrPara' -> 'Consultório' -> 'AtendimentosRealizados.aspx'
+    com clique seguro.
+    """
+    try:
+        # Alguns perfis precisam do clique por JS no IrPara
+        btn_ir = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "IrPara")))
+        driver.execute_script("arguments[0].click();", btn_ir)
+    except Exception:
+        # fallback tenta o mesmo com o safe_click
+        js_safe_click(driver, By.ID, "IrPara")
+
+    js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
+    js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
+    WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+
+
+
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 40)
     dados = {}
     try:
-        # 1. Login
+        # 1) Login
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
-        
-        time.sleep(5)
-        if len(driver.window_handles) > 1: driver.switch_to.window(driver.window_handles[-1])
 
-        # 2. Navegação
-        btn_ir_para = wait.until(EC.element_to_be_clickable((By.ID, "IrPara")))
-        driver.execute_script("arguments[0].click();", btn_ir_para)
-        
-        js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
-        js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
+        # 2) Entrar no AMHPTISS e garantir janela/tela correta + overlays removidos
+        _entrar_amhptiss(driver, wait, wait_after=8)
 
-        # 3. Pesquisa e Sincronização (Evita o erro de Stacktrace)
-        input_busca = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
+        # 3) Navegar até Atendimentos
+        _ir_para_atendimentos(driver, wait)
+
+        # 4) Buscar a guia
+        # (Em alguns ambientes o ID muda. Vamos tentar ambos.)
+        input_ids_possiveis = [
+            "ctl00_MainContent_rtbNumeroAtendimento",  # mais comum
+            "ctl00_MainContent_rtbNumeroGuia",         # fallback
+        ]
+        input_busca = None
+        for cand in input_ids_possiveis:
+            try:
+                input_busca = wait.until(EC.presence_of_element_located((By.ID, cand)))
+                break
+            except Exception:
+                continue
+
+        if not input_busca:
+            raise RuntimeError("Campo de busca de guia não foi localizado (IDs conhecidos não encontrados).")
+
+        # Limpa e digita
         input_busca.clear()
-        input_busca.send_keys(numero_guia)
-        
+        input_busca.send_keys(str(numero_guia).strip())
+
+        # Guardar referência da tabela antes de buscar (para esperar recarregar)
+        old_table = None
+        try:
+            old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        except Exception:
+            pass
+
+        # Clicar Buscar (JS)
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
         driver.execute_script("arguments[0].click();", btn_buscar)
-        
-        # AGUARDA A TABELA RECARREGAR (A parte mais importante)
-        time.sleep(4) 
-        
-        # Busca o link específico da guia nos resultados
-        xpath_guia = f"//a[contains(text(), '{numero_guia}')]"
-        link_guia = wait.until(EC.visibility_of_element_located((By.XPATH, xpath_guia)))
+
+        # Aguarda recarregar: (a) staleness da tabela anterior, (b) nova tabela presente
+        if old_table is not None:
+            try:
+                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
+            except Exception:
+                pass
+
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+
+        # 5) Aguardar link da guia aparecer e clicar
+        xpath_guia = f"//a[contains(text(), '{str(numero_guia).strip()}')]"
+        link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
         driver.execute_script("arguments[0].click();", link_guia)
-        
-        # 4. Captura
+
+        # 6) Coletar os dados
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(2)
+        time.sleep(1.5)  # pequeno respiro pós render
 
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
-        
+
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         html_tabela = tabela_el.get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
         return dados
+
     except Exception as e:
-        # Tira print para log em caso de erro
         try:
             driver.save_screenshot("erro_conexao_portal.png")
-        except:
+        except Exception:
             pass
-        return {"erro": str(e)}
+        return {"erro": f"{e.__class__.__name__}: {e}"}
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
 def modal_amhptiss_site(n_guia):
