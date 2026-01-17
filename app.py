@@ -253,24 +253,54 @@ def extrair_detalhes_site_amhp(numero_guia):
 
         # ========== 4) Campo de busca (ficar no MESMO iframe até buscar) ==========
         valor_solicitado = re.sub(r"\D+", "", str(numero_guia).strip())
-        input_ids = [
-            "ctl00_MainContent_rtbNumeroAtendimento",   # seu caso
-            "ctl00_MainContent_rtbNumeroGuia",          # fallback
-        ]
+        
+        def localizar_e_preencher_input(driver, val):
+            # Tenta no documento principal e depois em cada iframe
+            driver.switch_to.default_content()
+            
+            # Lista de IDs possíveis (o seu é o primeiro)
+            ids_alvo = ["ctl00_MainContent_rtbNumeroAtendimento", "ctl00_MainContent_rtbNumeroGuia"]
+            
+            # 1. Tenta achar no root
+            for iid in ids_alvo:
+                try:
+                    el = driver.find_element(By.ID, iid)
+                    if el.is_displayed():
+                        return el
+                except: continue
 
-        # Tenta localizar o input em qualquer iframe (e permanece nele)
-        campo_loc = None
-        for iid in input_ids:
-            try:
-                driver.switch_to.default_content()
-                _switch_to_iframe_that_contains(driver, By.ID, iid, timeout=12)
-                el = wait.until(EC.visibility_of_element_located((By.ID, iid)))
-                campo_loc = (By.ID, iid)
-                break
-            except Exception:
-                continue
-        if not campo_loc:
-            raise RuntimeError("Campo de busca (Atendimento/Guia) não localizado — verifique se há outro iframe.")
+            # 2. Se não achou, percorre os IFRAMES
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            for index, iframe in enumerate(iframes):
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(index)
+                    for iid in ids_alvo:
+                        try:
+                            el = driver.find_element(By.ID, iid)
+                            if el.is_displayed():
+                                return el
+                        except: continue
+                except: continue
+            return None
+
+        campo = localizar_e_preencher_input(driver, valor_solicitado)
+        
+        if campo:
+            # Força o valor via JavaScript para garantir que o RadInput receba
+            driver.execute_script("""
+                var el = arguments[0];
+                el.value = arguments[1];
+                el.focus();
+                // Dispara eventos para o componente Telerik reconhecer a mudança
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            """, campo, valor_solicitado)
+            
+            valor_no_campo = valor_solicitado # Confirmado via JS
+        else:
+            raise RuntimeError("Não foi possível localizar o campo 'Nº Atendimento' em nenhum frame.")
 
         # Digita com reforços (RadInput)
         def _type_and_read():
