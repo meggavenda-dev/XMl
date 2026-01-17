@@ -587,7 +587,7 @@ def conciliar_itens(
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
+    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""],], ignore_index=True)
 
     # 3ª opcional: descrição + valor (tolerância)
     fallback_matches = pd.DataFrame()
@@ -1157,10 +1157,10 @@ with tab_conc:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-
 # =========================================================
 # ABA 2 — Faturas Glosadas (XLSX) — com session_state
 # (Sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
+# + Itens interativos com modal/expander (compatibilidade)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
@@ -1172,6 +1172,7 @@ with tab_glosas:
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
+        st.session_state.glosas_item_modal = None  # item selecionado para detalhe
 
     glosas_files = st.file_uploader(
         "Relatórios de Faturas Glosadas (.xlsx):",
@@ -1196,6 +1197,7 @@ with tab_glosas:
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
+        st.session_state.glosas_item_modal = None
         st.rerun()
 
     if proc_click:
@@ -1208,6 +1210,7 @@ with tab_glosas:
             st.session_state.glosas_colmap = colmap
             st.session_state.glosas_ready = True
             st.session_state.glosas_files_sig = files_sig
+            st.session_state.glosas_item_modal = None
             st.rerun()
 
     if st.session_state.glosas_ready and st.session_state.glosas_data is not None:
@@ -1297,11 +1300,9 @@ with tab_glosas:
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # KPIs e análises (pós-filtro) — REMOVIDA a “Visão geral (após filtros)”
-
-        # Top motivos
-        st.markdown("### 🥇 Top motivos de glosa (por valor)")
+        # ---------- Top motivos ----------
         analytics = build_glosas_analytics(df_view, colmap)
+        st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
         else:
@@ -1313,7 +1314,7 @@ with tab_glosas:
             except Exception:
                 pass
 
-        # Tipo de glosa
+        # ---------- Tipo de glosa ----------
         st.markdown("### 🧷 Tipo de glosa")
         by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
         if by_tipo.empty:
@@ -1321,15 +1322,113 @@ with tab_glosas:
         else:
             st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
-        # Itens com maior valor glosado
+        # ---------- Itens/descrições com maior valor glosado — INTERATIVO ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
         if top_itens.empty:
             st.info("Coluna de 'Descrição' não encontrada.")
         else:
-            st.dataframe(apply_currency(top_itens.head(20), ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+            # Padroniza nome da coluna de descrição para exibir
+            df_items = top_itens.copy()
+            if "Descrição do Item" not in df_items.columns:
+                desc_col = colmap.get("descricao")
+                if desc_col and desc_col in df_items.columns:
+                    df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
 
-        # Convênios com maior valor glosado
+            # Exibe o TOP-N (ranking)
+            df_items_top = df_items.head(20).copy()
+            st.dataframe(
+                apply_currency(df_items_top, ["Valor Glosado (R$)"]),
+                use_container_width=True,
+                height=360
+            )
+            st.caption("Clique em **🔎 Ver guias** ao lado do item desejado para abrir a relação detalhada.")
+
+            # Ações por linha (botões)
+            for i, row in df_items_top.reset_index(drop=True).iterrows():
+                col_desc, col_val, col_btn = st.columns([0.65, 0.20, 0.15])
+                with col_desc:
+                    st.write(f"**{row.get('Descrição do Item', '')}**")
+                with col_val:
+                    try:
+                        st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
+                    except Exception:
+                        st.write("-")
+                with col_btn:
+                    if st.button("🔎 Ver guias", key=f"ver_guias_{i}"):
+                        st.session_state["glosas_item_modal"] = str(row.get("Descrição do Item", ""))
+                        st.rerun()
+
+            # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
+            def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
+                """Renderiza o detalhe do item selecionado (dentro do contexto atual)."""
+                dcol = colmap.get("descricao")
+                if not dcol or dcol not in df_view.columns:
+                    st.warning("Não foi possível localizar a coluna de descrição no dataset.")
+                    if st.button("Fechar", key="close_item_modal_err"):
+                        st.session_state["glosas_item_modal"] = None
+                        st.rerun()
+                    return
+
+                df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
+                if df_item.empty:
+                    st.info("Nenhuma linha encontrada para este item no recorte atual.")
+                else:
+                    # Colunas úteis (somente as que existirem)
+                    possiveis = [
+                        colmap.get("convenio"), colmap.get("prestador"),
+                        colmap.get("data_pagamento"), colmap.get("data_realizado"),
+                        colmap.get("motivo"), colmap.get("desc_motivo"),
+                        colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado"),
+                    ]
+                    show_cols = [c for c in possiveis if c and c in df_item.columns]
+
+                    total_reg = len(df_item)
+                    total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
+                    st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
+
+                    if show_cols:
+                        st.dataframe(
+                            apply_currency(
+                                df_item[show_cols],
+                                [
+                                    colmap.get("valor_cobrado") or "",
+                                    colmap.get("valor_glosa") or "",
+                                    colmap.get("valor_recursado") or "",
+                                ],
+                            ),
+                            use_container_width=True,
+                            height=420,
+                        )
+                    else:
+                        st.dataframe(df_item, use_container_width=True, height=420)
+
+                    # Download do recorte
+                    base_cols = show_cols if show_cols else df_item.columns.tolist()
+                    st.download_button(
+                        "⬇️ Baixar relação (CSV)",
+                        data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                        file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}.csv",
+                        mime="text/csv",
+                    )
+
+                if st.button("Fechar", key="close_item_modal_ok"):
+                    st.session_state["glosas_item_modal"] = None
+                    st.rerun()
+
+            # Abre modal se disponível; senão, usa expander
+            item_escolhido = st.session_state.get("glosas_item_modal")
+            if item_escolhido:
+                _title = f"Guias/linhas que contêm o item: {item_escolhido}"
+                if hasattr(st, "modal"):
+                    with st.modal(_title):
+                        _render_item_detail(df_view, colmap, item_escolhido)
+                else:
+                    with st.expander(_title, expanded=True):
+                        st.info("Sua versão do Streamlit não possui `st.modal`. Exibindo em um painel expansível.")
+                        _render_item_detail(df_view, colmap, item_escolhido)
+
+        # ---------- Convênios com maior valor glosado ----------
         st.markdown("### 🏥 Convênios com maior valor glosado")
         by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
         if by_conv.empty:
@@ -1349,7 +1448,7 @@ with tab_glosas:
         from io import BytesIO
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as wr:
-            # Apenas metadados mínimos do filtro na aba KPIs
+            # Metadados mínimos do filtro na aba KPIs
             k = analytics["kpis"] if analytics else dict(
                 linhas=len(df_view), periodo_ini=None, periodo_fim=None,
                 convenios=df_view[colmap["convenio"]].nunique() if colmap.get("convenio") in df_view.columns else 0,
