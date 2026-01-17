@@ -118,7 +118,6 @@ def _switch_to_iframe_that_contains(driver, by, value, timeout=15):
         try:
             driver.switch_to.default_content()
             driver.switch_to.frame(fr)
-            # tenta achar aqui
             driver.find_element(by, value)
             return  # achou dentro deste frame
         except Exception:
@@ -132,10 +131,8 @@ def _switch_to_iframe_that_contains(driver, by, value, timeout=15):
 
 def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_press_enter=False):
     """
-    Tenta digitar de forma robusta em RadTextBox (Telerik):
-    - Scroll + foco + Ctrl+A + Delete + send_keys(texto)
-    - ENTER (opcional) + TAB (opcional) para disparar blur/validação
-    - Valida value; se falhar, seta via JS + dispara eventos 'input/change/blur'
+    (Mantida como auxiliar) — digitação robusta em RadTextBox:
+    Ctrl+A + Delete + send_keys + (ENTER/TAB) + fallback JS (input/change/blur).
     """
     el = wait.until(EC.visibility_of_element_located(locator))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
@@ -151,20 +148,17 @@ def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_pr
     except Exception:
         pass
 
-    # Digita
     el.send_keys(str(texto).strip())
     if also_press_enter:
         el.send_keys(Keys.ENTER)
     if must_tab:
         el.send_keys(Keys.TAB)
 
-    # Valida se colou
     time.sleep(0.25)
-    val = el.get_attribute("value") or ""
-    if val.strip() == str(texto).strip():
+    val = (el.get_attribute("value") or "").strip()
+    if val == str(texto).strip():
         return True
 
-    # Fallback por JS: set value + dispara eventos
     try:
         driver.execute_script("""
             const el = arguments[0], v = arguments[1];
@@ -174,10 +168,93 @@ def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_pr
             el.dispatchEvent(new Event('blur', {bubbles:true}));
         """, el, str(texto).strip())
         time.sleep(0.25)
-        val2 = el.get_attribute("value") or ""
-        return val2.strip() == str(texto).strip()
+        val2 = (el.get_attribute("value") or "").strip()
+        return val2 == str(texto).strip()
     except Exception:
         return False
+
+
+# >>> NOVO HELPER CRÍTICO (RadInput + ClientState)
+def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_tab: bool = True) -> tuple[bool, str, str]:
+    """
+    Define valor em um Telerik RadInput garantindo sincronismo com o ClientState.
+    Retorna (ok, value_attr, client_validationText).
+    """
+    # Localiza os elementos na MESMA árvore/iframe
+    el = wait.until(EC.visibility_of_element_located((By.ID, base_id)))
+    hidden_id = f"{base_id}_ClientState"
+    hidden = driver.find_element(By.ID, hidden_id)
+
+    # Foco + limpar + digitar
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    try:
+        el.click()
+    except:
+        driver.execute_script("arguments[0].click();", el)
+
+    try:
+        el.send_keys(Keys.CONTROL, 'a')
+        el.send_keys(Keys.DELETE)
+    except Exception:
+        pass
+
+    el.send_keys(valor)
+    if press_tab:
+        el.send_keys(Keys.TAB)
+    time.sleep(0.2)
+
+    # 1ª leitura (depois de digitar)
+    val_attr = (el.get_attribute("value") or "").strip()
+
+    # Atualiza o ClientState com o JSON que o RadInput espera
+    client_state = {
+        "enabled": True,
+        "emptyMessage": "",
+        "validationText": valor,
+        "valueAsString": valor,
+        "lastSetTextBoxValue": valor
+    }
+    driver.execute_script(
+        "document.getElementById(arguments[0]).value = arguments[1];",
+        hidden_id,
+        json.dumps(client_state)
+    )
+
+    # Dispara eventos para a página 'enxergar' a mudança
+    driver.execute_script("""
+        var el = document.getElementById(arguments[0]);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+    """, base_id)
+
+    # (Opcional, mas ótimo) — usa API Telerik se disponível
+    driver.execute_script("""
+        try {
+            var ctl = window.$find && window.$find(arguments[0]);
+            if (ctl && ctl.set_value) {
+                ctl.set_value(arguments[1]);
+                if (ctl._textBoxElement) {
+                    ctl._textBoxElement.value = arguments[1];
+                }
+                if (typeof ctl._raiseTextChanged === 'function') ctl._raiseTextChanged();
+                if (typeof ctl._onTextboxBlur === 'function') ctl._onTextboxBlur();
+            }
+        } catch(e) {}
+    """, base_id, valor)
+    time.sleep(0.25)
+
+    # 2ª leitura (validação real)
+    val_attr2 = (el.get_attribute("value") or "").strip()
+    client_json = driver.execute_script("return document.getElementById(arguments[0]).value;", hidden_id) or ""
+    try:
+        client_obj = json.loads(client_json)
+        client_validation = (client_obj.get("validationText") or "").strip()
+    except Exception:
+        client_validation = ""
+
+    ok = (val_attr2 == valor) and (client_validation == valor)
+    return ok, val_attr2, client_validation
 
 
 def _entrar_amhptiss(driver, wait, wait_after=10):
@@ -236,125 +313,146 @@ def _ir_para_atendimentos(driver, wait):
 
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 30) # Reduzi para 30s para evitar travamentos longos
+    wait = WebDriverWait(driver, 50)
     dados = {}
     valor_no_campo = "(indisponível)"
-    
+    client_validationText_dbg = "(indisponível)"
     try:
         # 1) Login
         driver.get("https://portal.amhp.com.br/")
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        # 2) Acesso ao módulo AMHPTISS
-        _entrar_amhptiss(driver, wait, wait_after=8)
+        # 2) Entrar AMHPTISS e limpar overlays
+        _entrar_amhptiss(driver, wait, wait_after=10)
 
-        # 3) Navegação até Atendimentos Realizados
+        # 3) Navegar até a tela de Atendimentos
         _ir_para_atendimentos(driver, wait)
 
-        # 4) Localização exaustiva do campo (Busca em Iframes)
+        # 4) Campo de busca (ficar no MESMO iframe até clicar Buscar)
+        driver.switch_to.default_content()
         valor_solicitado = re.sub(r"\D+", "", str(numero_guia).strip())
-        ids_alvo = ["ctl00_MainContent_rtbNumeroAtendimento", "ctl00_MainContent_rtbNumeroGuia"]
-        
-        campo_encontrado = None
-        
-        # Função interna para vasculhar frames
-        def buscar_nos_frames():
-            driver.switch_to.default_content()
-            # Testa no nível principal
-            for iid in ids_alvo:
-                try:
-                    el = driver.find_element(By.ID, iid)
-                    if el.is_displayed(): return el
-                except: continue
-            
-            # Testa dentro de cada iframe
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            for idx, frame in enumerate(iframes):
-                try:
-                    driver.switch_to.default_content()
-                    driver.switch_to.frame(idx)
-                    for iid in ids_alvo:
-                        try:
-                            el = driver.find_element(By.ID, iid)
-                            if el.is_displayed(): return el
-                        except: continue
-                except: continue
-            return None
 
-        # Tenta localizar o campo por até 15 segundos
-        for _ in range(5):
-            campo_encontrado = buscar_nos_frames()
-            if campo_encontrado: break
-            time.sleep(2)
+        input_ids = [
+            "ctl00_MainContent_rtbNumeroAtendimento",  # seu caso típico
+            "ctl00_MainContent_rtbNumeroGuia",         # fallback
+        ]
+        campo_id = None
+        for iid in input_ids:
+            try:
+                driver.switch_to.default_content()
+                _switch_to_iframe_that_contains(driver, By.ID, iid, timeout=12)
+                wait.until(EC.visibility_of_element_located((By.ID, iid)))
+                campo_id = iid
+                break
+            except Exception:
+                continue
 
-        if not campo_encontrado:
-            raise RuntimeError("O campo 'Nº Atendimento' não ficou visível ou não foi encontrado nos frames.")
+        if not campo_id:
+            raise RuntimeError("Campo de busca (Atendimento/Guia) não localizado — verifique DOM/iframe no dump HTML.")
 
-        # 5) Preenchimento via JavaScript (Garante que o RadInput aceite o valor)
-        driver.execute_script("""
-            var el = arguments[0];
-            el.value = arguments[1];
-            el.focus();
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-        """, campo_encontrado, valor_solicitado)
-        
-        valor_no_campo = valor_solicitado
-        time.sleep(0.5)
+        # 5) *** PREENCHIMENTO RADINPUT + CLIENTSTATE ***
+        ok_set, val_attr2, client_validation = set_radinput_with_clientstate(
+            driver, wait, campo_id, valor_solicitado, press_tab=True
+        )
+        valor_no_campo = val_attr2
+        client_validationText_dbg = client_validation
 
-        # 6) Clique no botão Buscar
-        # O botão geralmente está no mesmo frame que o input
+        if not ok_set:
+            raise RuntimeError(
+                f"RadInput não aceitou o valor solicitado. value='{val_attr2}', ClientState.validationText='{client_validation}'"
+            )
+
+        # 6) Clique no botão Buscar (idealmente no MESMO iframe)
         btn_buscar_id = "ctl00_MainContent_btnBuscar_input"
         try:
-            btn_buscar = driver.find_element(By.ID, btn_buscar_id)
-            driver.execute_script("arguments[0].click();", btn_buscar)
-        except:
-            # Se falhar, tenta achar o botão em outros frames como último recurso
+            btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
+        except Exception:
             driver.switch_to.default_content()
-            _switch_to_iframe_that_contains(driver, By.ID, btn_buscar_id)
-            btn_buscar = driver.find_element(By.ID, btn_buscar_id)
-            driver.execute_script("arguments[0].click();", btn_buscar)
+            _switch_to_iframe_that_contains(driver, By.ID, btn_buscar_id, timeout=8)
+            btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
 
-        # 7) Sincronização e Coleta (Aguardar Grid atualizar)
-        time.sleep(3)
+        # Captura a grid antes para staleness
+        try:
+            old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        except Exception:
+            old_table = None
+
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
+        driver.execute_script("arguments[0].click();", btn_buscar)
+
+        # 7) Sincronização pós-busca
+        if old_table is not None:
+            try:
+                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
+            except Exception:
+                pass
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
+            )
+        except Exception:
+            pass
+
+        driver.switch_to.default_content()
+        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=12)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
-        
-        # Localiza o link da guia nos resultados
+
+        # 8) Abrir a guia pelo resultado
         link_guia = wait.until(EC.element_to_be_clickable((
-            By.XPATH, f"//a[contains(text(), '{valor_solicitado}')]"
+            By.XPATH, f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{valor_solicitado}')]"
         )))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
         driver.execute_script("arguments[0].click();", link_guia)
 
-        # 8) Extração final dos dados
-        time.sleep(2)
-        # Tenta entrar no frame de detalhes se ele existir
-        try: _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario")
-        except: pass
+        # 9) Coleta final
+        driver.switch_to.default_content()
+        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=12)
+        wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
+        time.sleep(0.8)
 
-        dados['paciente'] = wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario"))).get_attribute("value")
+        dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
 
         # Tabela de itens
+        try:
+            _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=6)
+        except Exception:
+            pass
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         html_tabela = tabela_el.get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
+        # Debug
         dados['debug_numero_solicitado'] = valor_solicitado
         dados['debug_valor_no_input'] = valor_no_campo
+        dados['debug_clientstate_validationText'] = client_validationText_dbg
 
         return dados
 
     except Exception as e:
-        driver.save_screenshot("erro_portal_amhp.png")
+        # Evidências
+        try:
+            driver.save_screenshot("erro_conexao_portal.png")
+        except Exception:
+            pass
+        try:
+            page_html = driver.page_source
+            with open("amhp_dump.html", "w", encoding="utf-8") as f:
+                f.write(page_html)
+        except Exception:
+            pass
         return {
-            "erro": f"Falha na automação: {str(e)}",
+            "erro": f"{e.__class__.__name__}: {e}",
             "debug_numero_solicitado": str(numero_guia),
-            "debug_valor_no_input": valor_no_campo
+            "debug_valor_no_input": valor_no_campo,
+            "debug_clientstate_validationText": client_validationText_dbg
         }
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
@@ -365,8 +463,12 @@ def modal_amhptiss_site(n_guia):
 
     if "erro" in res:
         st.error(f"Erro na conexão: {res['erro']}")
-        st.caption(f"🔎 Solicitado: {res.get('debug_numero_solicitado')}, Digitado no campo: {res.get('debug_valor_no_input')}")
-        # Se existirem evidências, mostra
+        st.caption(
+            f"🔎 Solicitado: {res.get('debug_numero_solicitado')} • "
+            f"Input.value: {res.get('debug_valor_no_input')} • "
+            f"ClientState.validationText: {res.get('debug_clientstate_validationText')}"
+        )
+        # Evidências
         if os.path.exists("erro_conexao_portal.png"):
             st.image("erro_conexao_portal.png", caption="Screenshot no momento do erro", use_column_width=True)
         if os.path.exists("amhp_dump.html"):
@@ -379,7 +481,11 @@ def modal_amhptiss_site(n_guia):
     else:
         st.subheader(f"👤 Paciente: {res['paciente']}")
         st.write(f"📅 Data do Atendimento: {res['data']}")
-        st.caption(f"🔎 Pesquisado: {res.get('debug_numero_solicitado')} • Digitado no campo: {res.get('debug_valor_no_input')}")
+        st.caption(
+            f"🔎 Pesquisado: {res.get('debug_numero_solicitado')} • "
+            f"Input.value: {res.get('debug_valor_no_input')} • "
+            f"ClientState.validationText: {res.get('debug_clientstate_validationText')}"
+        )
         st.divider()
         st.write("**Itens registrados no portal:**")
         st.dataframe(res['itens'], use_container_width=True)
@@ -1636,7 +1742,7 @@ with tab_glosas:
         df_view = df_g.copy()
         if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
             df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
-        if has_pagto and mes_sel_label:
+        if has_pagto && (mes_sel_label := mes_sel_label):
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
         # Série mensal (Pagamento)
@@ -1741,16 +1847,13 @@ with tab_glosas:
                         lista_guias = df_guia_temp[colmap["amhptiss"]].dropna().unique().tolist()
                         
                         if lista_guias:
-                            # 2. Criamos um seletor compacto para o usuário escolher qual guia pesquisar
                             guia_escolhida = st.selectbox(
                                 "Escolha a guia:", 
                                 lista_guias, 
                                 key=f"sel_guia_{i}",
                                 label_visibility="collapsed"
                             )
-                            # 3. Botão que dispara a pesquisa da guia selecionada
                             if st.button("🌐 Pesquisar", key=f"btn_site_{i}"):
-                                # Sanitiza e dispara o modal
                                 gnum = re.sub(r"\D+", "", str(guia_escolhida).strip())
                                 st.session_state["guia_para_pesquisa"] = gnum
                                 st.toast(f"Pesquisando guia AMHP/TISS: {gnum}", icon="🔎")
@@ -1878,7 +1981,8 @@ with tab_glosas:
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as wr:
             # Metadados mínimos do filtro na aba KPIs
-            k = analytics["kpis"] if analytics else dict(
+            # (coleta segura caso tenha filtrado convênio/meses)
+            k = analytics["kpis"] if 'analytics' in locals() and analytics else dict(
                 linhas=len(df_view), periodo_ini=None, periodo_fim=None,
                 convenios=df_view[colmap["convenio"]].nunique() if colmap.get("convenio") in df_view.columns else 0,
                 prestadores=df_view[colmap["prestador"]].nunique() if colmap.get("prestador") in df_view.columns else 0,
@@ -1886,6 +1990,10 @@ with tab_glosas:
                 valor_glosado=float(df_view["_valor_glosa_abs"].sum()) if "_valor_glosa_abs" in df_view.columns else 0.0,
                 taxa_glosa=0.0
             )
+            conv_sel = st.session_state.get("conv_glosas", "(todos)")
+            modo_periodo = st.session_state.get("modo_periodo", "Todos os meses (agrupado)")
+            mes_sel_label = st.session_state.get("mes_pagto_sel", "")
+
             kpi_df = pd.DataFrame([{
                 "Convênio (filtro)": conv_sel,
                 "Modo Período": modo_periodo,
@@ -1901,6 +2009,7 @@ with tab_glosas:
             }])
             kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
 
+            has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
             if has_pagto:
                 base_m = df_view[df_view["_is_glosa"] == True].copy()
                 if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
