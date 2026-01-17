@@ -541,10 +541,11 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
-    df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
-                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
+    df['chave_oper'] = (df['numeroGuiaOperadora'].fillna('').astype str).str.strip() \
+                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
     return df
 
+# helper para padronizar nomes do "lado XML" após merges com sufixos
 _XML_CORE_COLS = [
     'arquivo', 'numero_lote', 'tipo_guia',
     'numeroGuiaPrestador', 'numeroGuiaOperadora',
@@ -587,7 +588,7 @@ def conciliar_itens(
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""],], ignore_index=True)
+    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
     # 3ª opcional: descrição + valor (tolerância)
     fallback_matches = pd.DataFrame()
@@ -642,7 +643,7 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     if base.empty:
         return base
     if 'competencia' not in base.columns and 'Competência' in base.columns:
-        base['competencia'] = base['Competência'].astype(str)
+        base['competencia'] = base['Competência'].astype str
     elif 'competencia' not in base.columns:
         base['competencia'] = ""
     grp = (base.groupby('competencia', dropna=False, as_index=False)
@@ -799,6 +800,14 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
+
+        # >>> AMHPTISS (detecta inclusive a grafia exata 'Amhptiss')
+        "amhptiss": next((
+            c for c in cols
+            if str(c).strip().lower() in {
+                "amhptiss", "amhp tiss", "nº amhptiss", "numero amhptiss", "número amhptiss"
+            } or "amhptiss" in str(c).strip().lower() or str(c).strip() == "Amhptiss"
+        ), None),
     }
 
     # Números
@@ -1159,7 +1168,7 @@ with tab_conc:
 
 # =========================================================
 # ABA 2 — Faturas Glosadas (XLSX) — com session_state
-# (Sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
+# (Sem “Visão geral”, “Situação de recurso” e “Analista”)
 # + Itens interativos com modal/expander (compatibilidade)
 # =========================================================
 with tab_glosas:
@@ -1361,7 +1370,7 @@ with tab_glosas:
 
             # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
             def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
-                """Renderiza o detalhe do item selecionado (dentro do contexto atual)."""
+                """Renderiza o detalhe do item selecionado priorizando AMHPTISS."""
                 dcol = colmap.get("descricao")
                 if not dcol or dcol not in df_view.columns:
                     st.warning("Não foi possível localizar a coluna de descrição no dataset.")
@@ -1370,47 +1379,77 @@ with tab_glosas:
                         st.rerun()
                     return
 
+                # Recorte do item
                 df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
                 if df_item.empty:
                     st.info("Nenhuma linha encontrada para este item no recorte atual.")
-                else:
-                    # Colunas úteis (somente as que existirem)
-                    possiveis = [
-                        colmap.get("convenio"), colmap.get("prestador"),
-                        colmap.get("data_pagamento"), colmap.get("data_realizado"),
-                        colmap.get("motivo"), colmap.get("desc_motivo"),
-                        colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado"),
-                    ]
-                    show_cols = [c for c in possiveis if c and c in df_item.columns]
+                    if st.button("Fechar", key="close_item_modal_empty"):
+                        st.session_state["glosas_item_modal"] = None
+                        st.rerun()
+                    return
 
-                    total_reg = len(df_item)
-                    total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-                    st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
+                # AMHPTISS (mapeado em colmap; inclui fallback para grafias)
+                amhp_col = colmap.get("amhptiss")
+                if not amhp_col:
+                    for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
+                        if cand in df_item.columns:
+                            amhp_col = cand
+                            break
 
-                    if show_cols:
-                        st.dataframe(
-                            apply_currency(
-                                df_item[show_cols],
-                                [
-                                    colmap.get("valor_cobrado") or "",
-                                    colmap.get("valor_glosa") or "",
-                                    colmap.get("valor_recursado") or "",
-                                ],
-                            ),
-                            use_container_width=True,
-                            height=420,
-                        )
+                # Colunas úteis (AMHPTISS primeiro)
+                possiveis = [
+                    amhp_col,
+                    colmap.get("convenio"),
+                    colmap.get("prestador"),
+                    colmap.get("data_pagamento"),
+                    colmap.get("data_realizado"),
+                    colmap.get("motivo"),
+                    colmap.get("desc_motivo"),
+                    colmap.get("valor_cobrado"),
+                    colmap.get("valor_glosa"),
+                    colmap.get("valor_recursado"),
+                ]
+                show_cols = [c for c in possiveis if c and c in df_item.columns]
+
+                # Ordenação amigável: AMHPTISS -> Data de Pagamento
+                if amhp_col and amhp_col in df_item.columns:
+                    if colmap.get("data_pagamento") in df_item.columns:
+                        df_item = df_item.sort_values([amhp_col, colmap["data_pagamento"]], ascending=[True, True])
                     else:
-                        st.dataframe(df_item, use_container_width=True, height=420)
+                        df_item = df_item.sort_values([amhp_col], ascending=[True])
+                elif colmap.get("data_pagamento") in df_item.columns:
+                    df_item = df_item.sort_values([colmap["data_pagamento"]], ascending=[True])
 
-                    # Download do recorte
-                    base_cols = show_cols if show_cols else df_item.columns.tolist()
-                    st.download_button(
-                        "⬇️ Baixar relação (CSV)",
-                        data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
-                        file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}.csv",
-                        mime="text/csv",
+                # Cabeçalho/resumo
+                total_reg = len(df_item)
+                total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
+                st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
+
+                # Exibição
+                if show_cols:
+                    st.dataframe(
+                        apply_currency(
+                            df_item[show_cols],
+                            [
+                                colmap.get("valor_cobrado") or "",
+                                colmap.get("valor_glosa") or "",
+                                colmap.get("valor_recursado") or "",
+                            ],
+                        ),
+                        use_container_width=True,
+                        height=420,
                     )
+                else:
+                    st.dataframe(df_item, use_container_width=True, height=420)
+
+                # Download do recorte (com AMHPTISS se houver)
+                base_cols = show_cols if show_cols else df_item.columns.tolist()
+                st.download_button(
+                    "⬇️ Baixar relação (CSV)",
+                    data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                    file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}_AMHPTISS.csv",
+                    mime="text/csv",
+                )
 
                 if st.button("Fechar", key="close_item_modal_ok"):
                     st.session_state["glosas_item_modal"] = None
@@ -1442,7 +1481,7 @@ with tab_glosas:
             except Exception:
                 pass
 
-        # Exportação (sem “Visão geral (após filtros)”, “Situação de recurso” e “Analista”)
+        # Exportação (sem “Visão geral”, “Situação de recurso” e “Analista”)
         st.markdown("---")
         st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
         from io import BytesIO
@@ -1496,6 +1535,7 @@ with tab_glosas:
                 analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
 
             col_export = [c for c in [
+                colmap.get("amhptiss"),  # inclui AMHPTISS no export do recorte
                 colmap.get("data_pagamento"),
                 colmap.get("data_realizado"),
                 colmap.get("convenio"), colmap.get("prestador"),
