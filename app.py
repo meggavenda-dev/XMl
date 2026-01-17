@@ -30,8 +30,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
-from selenium.webdriver import ActionChains
-from selenium.webdriver.common.action_chains import ActionChains as AC
 
 # ========= Secrets/env p/ Selenium =========
 try:
@@ -52,14 +50,13 @@ def configurar_driver():
     if os.path.exists(chrome_binary):
         opts.binary_location = chrome_binary
 
-    # Flags que ajudam MUITO na estabilidade em ambientes headless
+    # Flags que ajudam muito em headless
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
 
-    # (opcional) prefs - mesmo sem download aqui, deixam o perfil consistente
     prefs = {
         "download.default_directory": os.getcwd(),
         "download.prompt_for_download": False,
@@ -76,23 +73,22 @@ def configurar_driver():
     else:
         driver = webdriver.Chrome(options=opts)
 
-    # Timeouts "longos", o AMHP costuma demorar
     driver.set_page_load_timeout(180)
     driver.set_script_timeout(180)
     return driver
 
 
 def js_safe_click(driver, by, value, timeout=30, retries=3, scroll_block='center'):
-    """
-    Clique via JS com rolagem e múltiplas tentativas. Evita 'Other element would receive the click'.
-    """
+    """Clique via JS com rolagem e múltiplas tentativas."""
     for attempt in range(retries):
         try:
             el = WebDriverWait(driver, timeout).until(
                 EC.presence_of_element_located((by, value))
             )
-            driver.execute_script(f"arguments[0].scrollIntoView({{block: '{scroll_block}'}});", el)
-            time.sleep(0.4)
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: arguments[1]});", el, scroll_block
+            )
+            time.sleep(0.3)
             driver.execute_script("arguments[0].click();", el)
             return
         except (TimeoutException, ElementClickInterceptedException):
@@ -108,7 +104,7 @@ def _switch_to_iframe_that_contains(driver, by, value, timeout=15):
     """
     try:
         driver.find_element(by, value)
-        return  # já estamos no contexto certo
+        return
     except Exception:
         pass
 
@@ -119,20 +115,18 @@ def _switch_to_iframe_that_contains(driver, by, value, timeout=15):
             driver.switch_to.default_content()
             driver.switch_to.frame(fr)
             driver.find_element(by, value)
-            return  # achou dentro deste frame
+            return
         except Exception:
             if time.time() > deadline:
                 break
             continue
 
-    # Se não encontrou em iframes, volta ao default
     driver.switch_to.default_content()
 
 
 def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_press_enter=False):
     """
-    (Mantida como auxiliar) — digitação robusta em RadTextBox:
-    Ctrl+A + Delete + send_keys + (ENTER/TAB) + fallback JS (input/change/blur).
+    Auxiliar de digitação robusta (Ctrl+A, Delete, send_keys, TAB/ENTER + JS fallback).
     """
     el = wait.until(EC.visibility_of_element_located(locator))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
@@ -141,7 +135,6 @@ def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_pr
     except Exception:
         driver.execute_script("arguments[0].click();", el)
 
-    # Limpeza agressiva: Ctrl+A + Delete
     try:
         el.send_keys(Keys.CONTROL, 'a')
         el.send_keys(Keys.DELETE)
@@ -174,18 +167,44 @@ def _force_type_in_radinput(driver, wait, locator, texto, must_tab=True, also_pr
         return False
 
 
-# >>> NOVO HELPER CRÍTICO (RadInput + ClientState)
+def dump_iframes(driver, out_path="iframes_dump.txt"):
+    """Salva uma lista dos iframes (id, name, src) para depuração."""
+    try:
+        driver.switch_to.default_content()
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        lines = []
+        lines.append(f"Total iframes: {len(iframes)}")
+        for idx, fr in enumerate(iframes):
+            try:
+                name = fr.get_attribute("name") or ""
+                _id  = fr.get_attribute("id") or ""
+                src  = fr.get_attribute("src") or ""
+                lines.append(f"[{idx}] id='{_id}' name='{name}' src='{src}'")
+            except Exception as e:
+                lines.append(f"[{idx}] (erro lendo atributos): {e}")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        pass
+
+
+def wait_page_ready(driver, timeout=30):
+    """Espera document.readyState='complete'."""
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
+
+
+# >>> Helper crítico (RadInput + ClientState) <<<
 def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_tab: bool = True) -> tuple[bool, str, str]:
     """
     Define valor em um Telerik RadInput garantindo sincronismo com o ClientState.
     Retorna (ok, value_attr, client_validationText).
     """
-    # Localiza os elementos na MESMA árvore/iframe
     el = wait.until(EC.visibility_of_element_located((By.ID, base_id)))
     hidden_id = f"{base_id}_ClientState"
     hidden = driver.find_element(By.ID, hidden_id)
 
-    # Foco + limpar + digitar
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
     try:
         el.click()
@@ -203,10 +222,10 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         el.send_keys(Keys.TAB)
     time.sleep(0.2)
 
-    # 1ª leitura (depois de digitar)
+    # 1ª leitura do input
     val_attr = (el.get_attribute("value") or "").strip()
 
-    # Atualiza o ClientState com o JSON que o RadInput espera
+    # Atualiza ClientState
     client_state = {
         "enabled": True,
         "emptyMessage": "",
@@ -220,7 +239,7 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         json.dumps(client_state)
     )
 
-    # Dispara eventos para a página 'enxergar' a mudança
+    # Dispara eventos no textbox
     driver.execute_script("""
         var el = document.getElementById(arguments[0]);
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -228,7 +247,7 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
         el.dispatchEvent(new Event('blur', { bubbles: true }));
     """, base_id)
 
-    # (Opcional, mas ótimo) — usa API Telerik se disponível
+    # API Telerik ($find)
     driver.execute_script("""
         try {
             var ctl = window.$find && window.$find(arguments[0]);
@@ -244,7 +263,7 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
     """, base_id, valor)
     time.sleep(0.25)
 
-    # 2ª leitura (validação real)
+    # 2ª leitura (validação)
     val_attr2 = (el.get_attribute("value") or "").strip()
     client_json = driver.execute_script("return document.getElementById(arguments[0]).value;", hidden_id) or ""
     try:
@@ -259,34 +278,42 @@ def set_radinput_with_clientstate(driver, wait, base_id: str, valor: str, press_
 
 def _entrar_amhptiss(driver, wait, wait_after=10):
     """
-    Entra no módulo AMHPTISS/TISS com fallback case-insensitive,
-    troca para a nova aba/janela se abrir, e remove overlays.
+    Entra no módulo AMHPTISS/TISS, troca de aba se necessário e remove overlays.
     """
     try:
-        # Tenta botão com texto literal
         btn_tiss = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'AMHPTISS')]")))
         driver.execute_script("arguments[0].click();", btn_tiss)
     except Exception:
-        # Fallback INSENSÍVEL a maiúsculas/minúsculas
         elems = driver.find_elements(
             By.XPATH,
             "//*[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TISS')]"
         )
         if elems:
             driver.execute_script("arguments[0].click();", elems[0])
-        # Se nada for encontrado, pode ser que já esteja no AMHPTISS
 
     time.sleep(wait_after)
 
-    # Se abriu em nova aba/janela, troca o foco
-    if len(driver.window_handles) > 1:
-        driver.switch_to.window(driver.window_handles[-1])
+    # Troca de janela/aba
+    try:
+        handles = driver.window_handles
+        if len(handles) > 1:
+            driver.switch_to.window(handles[-1])
+    except Exception:
+        pass
 
-    # Remove overlays/modais que bloqueiam cliques
+    # Espera carregamento e remove overlays
+    try:
+        wait_page_ready(driver, timeout=40)
+    except Exception:
+        pass
+
     try:
         driver.execute_script("""
-            const avisos = document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container');
-            avisos.forEach(el => el.remove());
+            (function(){
+             const sel = ['center','#fechar-informativo','.modal','.swal2-container',
+                          '.blockUI','.loader','.loading','.ui-dialog','.ui-widget-overlay'];
+             sel.forEach(s => document.querySelectorAll(s).forEach(el=>el.remove()));
+            })();
         """)
     except Exception:
         pass
@@ -294,16 +321,15 @@ def _entrar_amhptiss(driver, wait, wait_after=10):
 
 def _ir_para_atendimentos(driver, wait):
     """
-    A partir do AMHPTISS, abre o menu 'IrPara' -> 'Consultório' -> 'AtendimentosRealizados.aspx'
-    com clique seguro, e aguarda a grade aparecer.
+    AMHPTISS -> IrPara -> Consultório -> AtendimentosRealizados.aspx
     """
     js_safe_click(driver, By.ID, "IrPara", timeout=40)
-    time.sleep(1.5)
+    time.sleep(1.2)
     js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
-    time.sleep(1)
+    time.sleep(0.8)
     js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
 
-    # Aguarda o carregamento inicial da página (grid presente)
+    # Aguarda grid inicial
     try:
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
     except Exception:
@@ -323,35 +349,83 @@ def extrair_detalhes_site_amhp(numero_guia):
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        # 2) Entrar AMHPTISS e limpar overlays
+        # 2) AMHPTISS
         _entrar_amhptiss(driver, wait, wait_after=10)
 
-        # 3) Navegar até a tela de Atendimentos
+        # 3) Atendimentos
         _ir_para_atendimentos(driver, wait)
+
+        # 3.1 Fallback URL direta se grid não aparecer
+        try:
+            driver.switch_to.default_content()
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
+        except Exception:
+            try:
+                # >>> ajuste a URL se seu host/rota for diferente <<<
+                driver.switch_to.default_content()
+                driver.get("https://tiss.amhp.com.br/Consultorio/AtendimentosRealizados.aspx")
+                wait_page_ready(driver, timeout=40)
+                time.sleep(1.5)
+            except Exception:
+                pass
 
         # 4) Campo de busca (ficar no MESMO iframe até clicar Buscar)
         driver.switch_to.default_content()
         valor_solicitado = re.sub(r"\D+", "", str(numero_guia).strip())
-
         input_ids = [
-            "ctl00_MainContent_rtbNumeroAtendimento",  # seu caso típico
-            "ctl00_MainContent_rtbNumeroGuia",         # fallback
+            "ctl00_MainContent_rtbNumeroAtendimento",
+            "ctl00_MainContent_rtbNumeroGuia",
         ]
         campo_id = None
-        for iid in input_ids:
+        last_err = None
+
+        for attempt in range(2):
             try:
+                dump_iframes(driver, out_path=f"iframes_dump_attempt{attempt}.txt")
+
+                # Tenta no DOM atual
+                for iid in input_ids:
+                    try:
+                        el = driver.find_element(By.ID, iid)
+                        if el.is_displayed():
+                            campo_id = iid
+                            break
+                    except Exception:
+                        pass
+                if campo_id:
+                    break
+
+                # Tenta em iframes
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                for fr in iframes:
+                    try:
+                        driver.switch_to.default_content()
+                        driver.switch_to.frame(fr)
+                        for iid in input_ids:
+                            try:
+                                el = driver.find_element(By.ID, iid)
+                                if el.is_displayed():
+                                    campo_id = iid
+                                    break
+                            except Exception:
+                                pass
+                        if campo_id:
+                            break
+                    except Exception as e:
+                        last_err = e
+                if campo_id:
+                    break
+
                 driver.switch_to.default_content()
-                _switch_to_iframe_that_contains(driver, By.ID, iid, timeout=12)
-                wait.until(EC.visibility_of_element_located((By.ID, iid)))
-                campo_id = iid
-                break
-            except Exception:
-                continue
+                driver.save_screenshot(f"debug_no_input_attempt{attempt}.png")
+                time.sleep(1.0)
+            except Exception as e:
+                last_err = e
 
         if not campo_id:
-            raise RuntimeError("Campo de busca (Atendimento/Guia) não localizado — verifique DOM/iframe no dump HTML.")
+            raise RuntimeError(f"Campo de busca não localizado. Checar iframes_dump_attempt*.txt e debug_no_input_attempt*.png. Último erro: {last_err}")
 
-        # 5) *** PREENCHIMENTO RADINPUT + CLIENTSTATE ***
+        # 5) PREENCHIMENTO RADINPUT + CLIENTSTATE
         ok_set, val_attr2, client_validation = set_radinput_with_clientstate(
             driver, wait, campo_id, valor_solicitado, press_tab=True
         )
@@ -363,7 +437,7 @@ def extrair_detalhes_site_amhp(numero_guia):
                 f"RadInput não aceitou o valor solicitado. value='{val_attr2}', ClientState.validationText='{client_validation}'"
             )
 
-        # 6) Clique no botão Buscar (idealmente no MESMO iframe)
+        # 6) Buscar (no MESMO iframe, se possível)
         btn_buscar_id = "ctl00_MainContent_btnBuscar_input"
         try:
             btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
@@ -372,7 +446,6 @@ def extrair_detalhes_site_amhp(numero_guia):
             _switch_to_iframe_that_contains(driver, By.ID, btn_buscar_id, timeout=8)
             btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, btn_buscar_id)))
 
-        # Captura a grid antes para staleness
         try:
             old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         except Exception:
@@ -387,25 +460,26 @@ def extrair_detalhes_site_amhp(numero_guia):
                 WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
             except Exception:
                 pass
+
         try:
-            WebDriverWait(driver, 30).until(
+            WebDriverWait(driver, 40).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, ".rgLoading, .raDiv, .RadAjax .raDiv"))
             )
         except Exception:
             pass
 
         driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=12)
+        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=15)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
-        # 8) Abrir a guia pelo resultado
+        # 8) Abrir a guia no resultado
         link_guia = wait.until(EC.element_to_be_clickable((
             By.XPATH, f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{valor_solicitado}')]"
         )))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
         driver.execute_script("arguments[0].click();", link_guia)
 
-        # 9) Coleta final
+        # 9) Coleta de detalhes
         driver.switch_to.default_content()
         _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=12)
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
@@ -414,7 +488,6 @@ def extrair_detalhes_site_amhp(numero_guia):
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
 
-        # Tabela de itens
         try:
             _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=6)
         except Exception:
@@ -437,9 +510,12 @@ def extrair_detalhes_site_amhp(numero_guia):
         except Exception:
             pass
         try:
-            page_html = driver.page_source
             with open("amhp_dump.html", "w", encoding="utf-8") as f:
-                f.write(page_html)
+                f.write(driver.page_source)
+        except Exception:
+            pass
+        try:
+            dump_iframes(driver, out_path="iframes_dump_final.txt")
         except Exception:
             pass
         return {
@@ -468,7 +544,6 @@ def modal_amhptiss_site(n_guia):
             f"Input.value: {res.get('debug_valor_no_input')} • "
             f"ClientState.validationText: {res.get('debug_clientstate_validationText')}"
         )
-        # Evidências
         if os.path.exists("erro_conexao_portal.png"):
             st.image("erro_conexao_portal.png", caption="Screenshot no momento do erro", use_column_width=True)
         if os.path.exists("amhp_dump.html"):
@@ -476,6 +551,13 @@ def modal_amhptiss_site(n_guia):
                 try:
                     with open("amhp_dump.html", "r", encoding="utf-8") as f:
                         st.code(f.read()[:100000], language="html")
+                except Exception:
+                    pass
+        if os.path.exists("iframes_dump_final.txt"):
+            with st.expander("🧭 Lista de iframes (final)", expanded=False):
+                try:
+                    with open("iframes_dump_final.txt", "r", encoding="utf-8") as f:
+                        st.code(f.read(), language="text")
                 except Exception:
                     pass
     else:
@@ -559,7 +641,6 @@ MAP_FILE = "demo_mappings.json"
 
 def categorizar_motivo_ans(codigo: str) -> str:
     codigo = str(codigo).strip()
-    # Mapeamento simplificado (exemplos)
     if codigo in ['1001','1002','1003','1006','1009']: return "Cadastro/Elegibilidade"
     if codigo in ['1201','1202','1205','1209']: return "Autorização/SADT"
     if codigo in ['1801','1802','1805','1806']: return "Tabela/Preços"
@@ -583,7 +664,6 @@ def save_demo_mappings(mappings: dict):
     except Exception as e:
         st.error(f"Erro ao salvar mapeamentos: {e}")
 
-# Carrega mapeamentos persistidos na inicialização
 if "demo_mappings" not in st.session_state:
     st.session_state["demo_mappings"] = load_demo_mappings()
 
@@ -594,7 +674,6 @@ def _cached_read_excel(file, sheet_name=0) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def _cached_xml_bytes(b: bytes) -> List[Dict]:
-    # Apenas para cachear parsing; será chamado com bytes do upload
     from io import BytesIO
     return parse_itens_tiss_xml(BytesIO(b))
 
@@ -756,13 +835,11 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    # 1) tenta Excel; se falhar, tenta CSV
     try:
         df_raw = pd.read_excel(path, header=None, engine="openpyxl")
     except:
         df_raw = pd.read_csv(path, header=None)
 
-    # 2) Localiza linha de cabeçalho (onde aparece CPF/CNPJ)
     header_row = None
     for i in range(min(20, len(df_raw))):
         row_values = df_raw.iloc[i].astype(str).tolist()
@@ -772,12 +849,10 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     if header_row is None:
         raise ValueError("Não foi possível localizar a linha de cabeçalho 'CPF/CNPJ' no demonstrativo.")
 
-    # 3) Lê a partir do cabeçalho correto
     df = df_raw.iloc[header_row + 1:].copy()
     df.columns = df_raw.iloc[header_row]
     df = df.loc[:, df.columns.notna()]
 
-    # 4) Renomeia
     ren = {
         "Guia": "numeroGuiaPrestador",
         "Cod. Procedimento": "codigo_procedimento",
@@ -790,30 +865,22 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     }
     df = df.rename(columns=ren)
 
-    # 5) Limpezas
     df["numeroGuiaPrestador"] = (
         df["numeroGuiaPrestador"]
-        .astype(str)
-        .str.replace(".0", "", regex=False)
-        .str.strip()
-        .str.lstrip("0")
+        .astype(str).str.replace(".0", "", regex=False).str.strip().str.lstrip("0")
     )
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
 
-    # 6) Normaliza código (TUSS/SIMPRO)
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
 
-    # 7) Números
     for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
 
-    # 8) Chaves
     df["chave_demo"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
 
-    # 9) Motivo de glosa (código/descrição)
     if "codigo_glosa_bruto" in df.columns:
         df["motivo_glosa_codigo"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^(\d+)")
         df["motivo_glosa_descricao"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^\d+\s*-\s*(.*)")
@@ -1013,7 +1080,6 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
 
     return df
 
-# helper para padronizar nomes do "lado XML" após merges com sufixos
 _XML_CORE_COLS = [
     'arquivo', 'numero_lote', 'tipo_guia',
     'numeroGuiaPrestador', 'numeroGuiaOperadora',
@@ -1043,12 +1109,10 @@ def conciliar_itens(
     fallback_por_descricao: bool = False,
 ) -> Dict[str, pd.DataFrame]:
 
-    # 1ª: chave do prestador
     m1 = df_xml.merge(df_demo, left_on="chave_prest", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # 2ª: chave da operadora
     restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
     cols_xml = df_xml.columns.tolist()
@@ -1058,7 +1122,6 @@ def conciliar_itens(
 
     conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
-    # 3ª opcional: descrição + valor (tolerância)
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
         ainda_sem_match = m2[m2["matched_on"] == ""].copy()
@@ -1080,7 +1143,6 @@ def conciliar_itens(
                     fallback_matches["matched_on"] = "descricao+valor"
                     conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
-    # unmatch final
     if not fallback_matches.empty:
         chaves_resolvidas = fallback_matches["chave_prest"].unique()
         unmatch = m2[(m2["matched_on"] == "") & (~m2["chave_prest"].isin(chaves_resolvidas))].copy()
@@ -1092,7 +1154,6 @@ def conciliar_itens(
         if subset_cols:
             unmatch = unmatch.drop_duplicates(subset=subset_cols)
 
-    # cálculos
     if not conc.empty:
         conc = _alias_xml_cols(conc)
         conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
@@ -1104,13 +1165,12 @@ def conciliar_itens(
     return {"conciliacao": conc, "nao_casados": unmatch}
 
 # -----------------------------
-# Analytics (derivados do conciliado)
+# Analytics
 # -----------------------------
 def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
-
     if 'competencia' not in base.columns and 'Competência' in base.columns:
         base['competencia'] = base['Competência'].astype(str)
     elif 'competencia' not in base.columns:
@@ -1218,11 +1278,10 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
     agg["numero_lote(s)"] = agg["numero_lote"].apply(lambda L: ", ".join(L))
     agg.drop(columns=["arquivo","numero_lote"], inplace=True)
     agg["chave_guia"] = agg.apply(lambda r: build_chave_guia(r["tipo_guia"], r["numeroGuiaPrestador"], r["numeroGuiaOperadora"]), axis=1)
-    # função mantida para uso futuro; não é chamada na interface/export
     return agg
 
 # =========================================================
-# PARTE 5.1 — Helpers da aba "Faturas Glosadas (XLSX)" (única definição)
+# PARTE 5.1 — Helpers da aba "Faturas Glosadas (XLSX)"
 # =========================================================
 def _pick_col(df: pd.DataFrame, *candidates):
     """Retorna o primeiro nome de coluna que existir no DF dentre os candidatos."""
@@ -1258,10 +1317,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
         "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
         "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
-
-        # Data de Pagamento
         "data_pagamento": next((c for c in cols if "Pagamento" in str(c)), None),
-
         "data_realizado": next((c for c in cols if "Realizado" in str(c)), None),
         "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
         "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
@@ -1269,8 +1325,6 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
-
-        # >>> AMHPTISS
         "amhptiss": next((
             c for c in cols
             if str(c).strip().lower() in {
@@ -1288,7 +1342,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     if colmap["data_realizado"] and colmap["data_realizado"] in df.columns:
         df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
 
-    # Pagamento (sempre cria colunas derivadas)
+    # Pagamento (sempre cria derivadas)
     if colmap["data_pagamento"] and colmap["data_pagamento"] in df.columns:
         df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce")
     else:
@@ -1320,7 +1374,6 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     cm = colmap
     m = df["_is_glosa"].fillna(False)
 
-    # KPIs (pós-filtro)
     total_linhas = len(df)
     periodo_ini = df[cm["data_realizado"]].min() if cm["data_realizado"] in df.columns else None
     periodo_fim = df[cm["data_realizado"]].max() if cm["data_realizado"] in df.columns else None
@@ -1330,7 +1383,6 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     convenios = int(df[cm["convenio"]].nunique()) if cm["convenio"] in df.columns else 0
     prestadores = int(df[cm["prestador"]].nunique()) if cm["prestador"] in df.columns else 0
 
-    # Agrupamentos (apenas glosadas)
     base = df.loc[m].copy()
 
     def _agg(df_, keys):
@@ -1339,15 +1391,13 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
         out = (df_.groupby(keys, dropna=False, as_index=False)
                .agg(Qtd=('_is_glosa', 'size'),
                     Valor_Glosado=('_valor_glosa_abs', 'sum')))
-        out = out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
-        return out
+        return out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
 
-    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm["motivo"] and cm["desc_motivo"] else pd.DataFrame()
-    by_tipo     = _agg(base, [cm["tipo_glosa"]]) if cm["tipo_glosa"] else pd.DataFrame()
-    top_itens   = _agg(base, [cm["descricao"]]) if cm["descricao"] else pd.DataFrame()
-    by_convenio = _agg(base, [cm["convenio"]]) if cm["convenio"] else pd.DataFrame()
+    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm.get("motivo") and cm.get("desc_motivo") else pd.DataFrame()
+    by_tipo     = _agg(base, [cm["tipo_glosa"]]) if cm.get("tipo_glosa") else pd.DataFrame()
+    top_itens   = _agg(base, [cm["descricao"]]) if cm.get("descricao") else pd.DataFrame()
+    by_convenio = _agg(base, [cm["convenio"]]) if cm.get("convenio") else pd.DataFrame()
 
-    # Labels bonitos
     if not top_motivos.empty:
         top_motivos = top_motivos.rename(columns={
             cm["motivo"]: "Motivo",
@@ -1357,9 +1407,9 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     if not by_tipo.empty:
         by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
     if not top_itens.empty:
-        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor Glosado":"Valor Glosado (R$)"})
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
     if not by_convenio.empty:
-        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor Glosado":"Valor Glosado (R$)"})
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
 
     return dict(
         kpis=dict(
@@ -1398,7 +1448,6 @@ with tab_conc:
     xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True, key="xml_up")
     demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True, key="demo_up")
 
-    # PROCESSAMENTO DO DEMONSTRATIVO (SEMPRE) — para permitir wizard
     df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
     if not df_demo.empty:
         st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
@@ -1408,7 +1457,6 @@ with tab_conc:
 
     st.markdown("---")
     if st.button("🚀 Processar Conciliação & Analytics", type="primary", key="btn_conc"):
-        # 1) XML
         df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
         if df_xml.empty:
             st.warning("Nenhum item extraído do(s) XML(s). Verifique os arquivos.")
@@ -1421,7 +1469,6 @@ with tab_conc:
             st.warning("Nenhum demonstrativo válido para conciliar.")
             st.stop()
 
-        # 2) Conciliação
         result = conciliar_itens(
             df_xml=df_xml,
             df_demo=df_demo,
@@ -1448,11 +1495,10 @@ with tab_conc:
             st.download_button("Baixar Não Conciliados (CSV)", data=unmatch.to_csv(index=False).encode("utf-8"),
                                file_name="nao_conciliados.csv", mime="text/csv")
 
-        # 3) Analytics — apenas conciliado
+        # Analytics (conciliado)
         st.markdown("---")
         st.subheader("📊 Analytics de Glosa (apenas itens conciliados)")
 
-        # 3.1 Competência
         st.markdown("### 📈 Tendência por competência")
         kpi_comp = kpis_por_competencia(conc)
         st.dataframe(apply_currency(kpi_comp, ['valor_apresentado','valor_pago','valor_glosa']), use_container_width=True)
@@ -1461,7 +1507,6 @@ with tab_conc:
         except Exception:
             pass
 
-        # 3.2 Top Itens
         st.markdown("### 🏆 TOP itens glosados (valor e %)")
         min_apres = st.number_input("Corte mínimo de Apresentado para ranking por % (R$)", min_value=0.0, value=500.0, step=50.0, key="min_apres_pct")
         top_valor, top_pct = ranking_itens_glosa(conc, min_apresentado=min_apres, topn=20)
@@ -1473,7 +1518,6 @@ with tab_conc:
             st.markdown("**Por % de glosa (TOP 20)**")
             st.dataframe(apply_currency(top_pct, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-        # 3.3 Motivos
         st.markdown("### 🧩 Motivos de glosa — análise")
         comp_opts = ['(todas)']
         if 'competencia' in conc.columns:
@@ -1482,7 +1526,6 @@ with tab_conc:
         motdf = motivos_glosa(conc, None if comp_sel=='(todas)' else comp_sel)
         st.dataframe(apply_currency(motdf, ['valor_glosa','valor_apresentado']), use_container_width=True)
 
-        # 3.4 Médicos
         st.markdown("### 👩‍⚕️ Médicos — ranking por glosa")
         if 'competencia' in conc.columns:
             comp_med = st.selectbox("Competência (médicos)",
@@ -1500,7 +1543,6 @@ with tab_conc:
         st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]),
                                     ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-        # 3.5 Por Tabela (se existir)
         st.markdown("### 🧾 Glosa por Tabela (22/19)")
         if 'Tabela' in conc.columns:
             tab = (conc.groupby('Tabela', as_index=False)
@@ -1512,14 +1554,12 @@ with tab_conc:
         else:
             st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
 
-        # 3.6 Qualidade da Conciliação
         if 'matched_on' in conc.columns:
             st.markdown("### 🧪 Qualidade da conciliação (origem do match)")
             match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
             st.bar_chart(match_dist.set_index('origem'))
             st.dataframe(match_dist, use_container_width=True)
 
-        # 3.7 Outliers
         st.markdown("### 🚩 Outliers em valor apresentado (por procedimento)")
         out_df = outliers_por_procedimento(conc, k=1.5)
         if out_df.empty:
@@ -1529,7 +1569,6 @@ with tab_conc:
             st.download_button("Baixar Outliers (CSV)", data=out_df.to_csv(index=False).encode("utf-8"),
                                file_name="outliers_valor_apresentado.csv", mime="text/csv")
 
-        # 3.8 Simulador
         st.markdown("### 🧮 Simulador de faturamento (what‑if por motivo de glosa)")
         motivos_disponiveis = sorted(conc['motivo_glosa_codigo'].dropna().astype(str).unique().tolist()) if 'motivo_glosa_codigo' in conc.columns else []
         if motivos_disponiveis:
@@ -1551,10 +1590,8 @@ with tab_conc:
                 pago_sim=('valor_pago_sim','sum')
             ))
             st.json({k: f_currency(v) for k, v in res.to_dict().items()})
-        else:
-            st.info("Sem motivos de glosa identificados para simulação.")
 
-        # Exportação
+        # Export Excel consolidado
         st.markdown("---")
         st.subheader("📥 Exportar Excel Consolidado")
 
@@ -1605,29 +1642,6 @@ with tab_conc:
                 lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
             kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
-
-            top_valor.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Valor')
-            top_pct.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Pct')
-
-            if 'matched_on' in conc.columns:
-                match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
-                match_dist.to_excel(wr, index=False, sheet_name='Qualidade_Conciliacao')
-
-            if not out_df.empty:
-                out_df.to_excel(wr, index=False, sheet_name='Outliers')
-
-            # Ajustes visuais
-            for name in wr.sheets:
-                ws = wr.sheets[name]
-                ws.freeze_panes = "A2"
-                for col in ws.columns:
-                    try:
-                        col_letter = col[0].column_letter
-                    except Exception:
-                        continue
-                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
-
         st.download_button(
             "⬇️ Baixar Excel consolidado",
             data=buf.getvalue(),
@@ -1636,21 +1650,18 @@ with tab_conc:
         )
 
 # =========================================================
-# ABA 2 — Faturas Glosadas (XLSX) — com session_state
-# (Sem “Visão geral”, “Situação de recurso” e “Analista”)
-# + Itens interativos com modal/expander (compatibilidade)
+# ABA 2 — Faturas Glosadas (XLSX)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
     st.caption("A análise respeita filtros por **Convênio** e por **mês de Pagamento**. O processamento é persistido com session_state.")
 
-    # ---------- Estado inicial ----------
     if "glosas_ready" not in st.session_state:
         st.session_state.glosas_ready = False
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
-        st.session_state.glosas_item_modal = None  # item selecionado para detalhe
+        st.session_state.glosas_item_modal = None
 
     glosas_files = st.file_uploader(
         "Relatórios de Faturas Glosadas (.xlsx):",
@@ -1699,7 +1710,7 @@ with tab_glosas:
         df_g   = st.session_state.glosas_data
         colmap = st.session_state.glosas_colmap
 
-        # Diagnóstico (opcional)
+        # Diagnóstico
         with st.expander("🔧 Diagnóstico (debug rápido)", expanded=False):
             st.write("**Colunas do DataFrame:**", list(df_g.columns))
             st.write("**Mapeamento detectado (colmap):**")
@@ -1742,7 +1753,7 @@ with tab_glosas:
         df_view = df_g.copy()
         if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
             df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
-        if has_pagto and (mes_sel_label := mes_sel_label):
+        if has_pagto and mes_sel_label:
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
         # Série mensal (Pagamento)
@@ -1778,7 +1789,7 @@ with tab_glosas:
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # ---------- Top motivos ----------
+        # Top motivos / tipo / itens / convênios
         analytics = build_glosas_analytics(df_view, colmap)
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
@@ -1792,7 +1803,6 @@ with tab_glosas:
             except Exception:
                 pass
 
-        # ---------- Tipo de glosa ----------
         st.markdown("### 🧷 Tipo de glosa")
         by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
         if by_tipo.empty:
@@ -1800,79 +1810,47 @@ with tab_glosas:
         else:
             st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
-        # ---------- Itens/descrições com maior valor glosado — INTERATIVO ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
         if top_itens.empty:
             st.info("Coluna de 'Descrição' não encontrada.")
         else:
-            # Padroniza nome da coluna de descrição para exibir
             df_items = top_itens.copy()
             if "Descrição do Item" not in df_items.columns:
                 desc_col = colmap.get("descricao")
                 if desc_col and desc_col in df_items.columns:
                     df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
 
-            # Exibe o TOP-N (ranking)
             df_items_top = df_items.head(20).copy()
             st.dataframe(
                 apply_currency(df_items_top, ["Valor Glosado (R$)"]),
                 use_container_width=True,
                 height=360
             )
-            st.caption("Clique em **🔎 Ver guias** ao lado do item desejado para abrir a relação detalhada.")
+            st.caption("Clique em **🔎 Detalhes** para ver a relação (abaixo).")
 
-            # Ações por linha (botões)
             for i, row in df_items_top.reset_index(drop=True).iterrows():
                 col_desc, col_val, col_btn = st.columns([0.55, 0.15, 0.30])
                 item_nome = row.get('Descrição do Item', '')
-                
                 with col_desc:
                     st.write(f"**{item_nome}**")
                 with col_val:
                     try: st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
                     except: st.write("-")
-                
                 with col_btn:
-                    c_det, c_site = st.columns(2)
-                    
-                    with c_det:
-                        if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
-                            st.session_state["glosas_item_modal"] = str(item_nome)
-                            st.rerun()
-                    
-                    with c_site:
-                        # 1. Filtramos as guias que pertencem a este item específico
-                        df_guia_temp = df_view[df_view[colmap["descricao"]] == item_nome]
-                        lista_guias = df_guia_temp[colmap["amhptiss"]].dropna().unique().tolist()
-                        
-                        if lista_guias:
-                            guia_escolhida = st.selectbox(
-                                "Escolha a guia:", 
-                                lista_guias, 
-                                key=f"sel_guia_{i}",
-                                label_visibility="collapsed"
-                            )
-                            if st.button("🌐 Pesquisar", key=f"btn_site_{i}"):
-                                gnum = re.sub(r"\D+", "", str(guia_escolhida).strip())
-                                st.session_state["guia_para_pesquisa"] = gnum
-                                st.toast(f"Pesquisando guia AMHP/TISS: {gnum}", icon="🔎")
-                                modal_amhptiss_site(gnum)
-                        else:
-                            st.caption("Sem guia AMHP")
+                    if st.button("🔎 Detalhes", key=f"ver_guias_{i}"):
+                        st.session_state["glosas_item_modal"] = str(item_nome)
+                        st.rerun()
 
-            # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
             def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
-                """Renderiza o detalhe do item selecionado priorizando AMHPTISS."""
                 dcol = colmap.get("descricao")
-                if not dcol or dcol not in df_view.columns:
+                if not dcol or not dcol in df_view.columns:
                     st.warning("Não foi possível localizar a coluna de descrição no dataset.")
                     if st.button("Fechar", key="close_item_modal_err"):
                         st.session_state["glosas_item_modal"] = None
                         st.rerun()
                     return
 
-                # Recorte do item
                 df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
                 if df_item.empty:
                     st.info("Nenhuma linha encontrada para este item no recorte atual.")
@@ -1881,7 +1859,6 @@ with tab_glosas:
                         st.rerun()
                     return
 
-                # AMHPTISS (mapeado em colmap; inclui fallback para grafias)
                 amhp_col = colmap.get("amhptiss")
                 if not amhp_col:
                     for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
@@ -1889,7 +1866,6 @@ with tab_glosas:
                             amhp_col = cand
                             break
 
-                # Colunas úteis (AMHPTISS primeiro)
                 possiveis = [
                     amhp_col,
                     colmap.get("convenio"),
@@ -1904,21 +1880,10 @@ with tab_glosas:
                 ]
                 show_cols = [c for c in possiveis if c and c in df_item.columns]
 
-                # Ordenação amigável: AMHPTISS -> Data de Pagamento
-                if amhp_col and amhp_col in df_item.columns:
-                    if colmap.get("data_pagamento") in df_item.columns:
-                        df_item = df_item.sort_values([amhp_col, colmap["data_pagamento"]], ascending=[True, True])
-                    else:
-                        df_item = df_item.sort_values([amhp_col], ascending=[True])
-                elif colmap.get("data_pagamento") in df_item.columns:
-                    df_item = df_item.sort_values([colmap["data_pagamento"]], ascending=[True])
-
-                # Cabeçalho/resumo
                 total_reg = len(df_item)
                 total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
                 st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
 
-                # Exibição
                 if show_cols:
                     st.dataframe(
                         apply_currency(
@@ -1935,7 +1900,6 @@ with tab_glosas:
                 else:
                     st.dataframe(df_item, use_container_width=True, height=420)
 
-                # Download do recorte (com AMHPTISS se houver)
                 base_cols = show_cols if show_cols else df_item.columns.tolist()
                 st.download_button(
                     "⬇️ Baixar relação (CSV)",
@@ -1948,7 +1912,6 @@ with tab_glosas:
                     st.session_state["glosas_item_modal"] = None
                     st.rerun()
 
-            # Abre modal se disponível; senão, usa expander
             item_escolhido = st.session_state.get("glosas_item_modal")
             if item_escolhido:
                 _title = f"Guias/linhas que contêm o item: {item_escolhido}"
@@ -1960,7 +1923,7 @@ with tab_glosas:
                         st.info("Sua versão do Streamlit não possui `st.modal`. Exibindo em um painel expansível.")
                         _render_item_detail(df_view, colmap, item_escolhido)
 
-        # ---------- Convênios com maior valor glosado ----------
+        # Convênios
         st.markdown("### 🏥 Convênios com maior valor glosado")
         by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
         if by_conv.empty:
@@ -1974,15 +1937,13 @@ with tab_glosas:
             except Exception:
                 pass
 
-        # Exportação (sem “Visão geral”, “Situação de recurso” e “Analista”)
+        # Export análise XLSX (glosas)
         st.markdown("---")
         st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
         from io import BytesIO
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as wr:
-            # Metadados mínimos do filtro na aba KPIs
-            # (coleta segura caso tenha filtrado convênio/meses)
-            k = analytics["kpis"] if 'analytics' in locals() and analytics else dict(
+            k = analytics["kpis"] if analytics else dict(
                 linhas=len(df_view), periodo_ini=None, periodo_fim=None,
                 convenios=df_view[colmap["convenio"]].nunique() if colmap.get("convenio") in df_view.columns else 0,
                 prestadores=df_view[colmap["prestador"]].nunique() if colmap.get("prestador") in df_view.columns else 0,
@@ -2034,7 +1995,7 @@ with tab_glosas:
                 analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
 
             col_export = [c for c in [
-                colmap.get("amhptiss"),  # inclui AMHPTISS no export do recorte
+                colmap.get("amhptiss"),
                 colmap.get("data_pagamento"),
                 colmap.get("data_realizado"),
                 colmap.get("convenio"), colmap.get("prestador"),
@@ -2046,7 +2007,6 @@ with tab_glosas:
             if not raw.empty:
                 raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
 
-            # Ajustes visuais
             for name in wr.sheets:
                 ws = wr.sheets[name]
                 ws.freeze_panes = "A2"
