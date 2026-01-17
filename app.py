@@ -1184,257 +1184,315 @@ with tab_conc:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+
 # =========================================================
-# ABA 2 — Faturas Glosadas (XLSX) — por Pagamento + filtros
+# ABA 2 — Faturas Glosadas (XLSX) — com session_state (persistência)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
-    st.caption("A análise respeita filtros por **Convênio** e **mês de Pagamento** (Todos os meses ou Um mês).")
+    st.caption("A análise respeita filtros por **Convênio** e por **mês de Pagamento**. O processamento é persistido com session_state.")
 
-    glosas_files = st.file_uploader("Relatórios de Faturas Glosadas (.xlsx):", type=["xlsx"], accept_multiple_files=True, key="glosas_xlsx_up")
-    if not glosas_files:
-        st.info("Envie pelo menos um arquivo .xlsx para iniciar.")
-    else:
-        if st.button("📊 Processar Faturas Glosadas", type="primary", key="proc_glosas"):
+    # ---------- Estado inicial (chaves do session_state) ----------
+    if "glosas_ready" not in st.session_state:
+        st.session_state.glosas_ready = False       # já existe um resultado processado?
+        st.session_state.glosas_data = None         # DF processado (concat dos arquivos)
+        st.session_state.glosas_colmap = None       # mapeamento de colunas
+        st.session_state.glosas_files_sig = None    # assinatura dos arquivos usados no processamento atual
+
+    # Upload
+    glosas_files = st.file_uploader(
+        "Relatórios de Faturas Glosadas (.xlsx):",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="glosas_xlsx_up"
+    )
+
+    # Função auxiliar: assinatura simples dos arquivos (nome + tamanho)
+    def _files_signature(files):
+        if not files:
+            return None
+        # UploadedFile costuma ter .name e .size
+        return tuple(sorted((getattr(f, "name", ""), getattr(f, "size", 0)) for f in files))
+
+    # Linha de ações (Processar / Limpar)
+    a1, a2 = st.columns(2)
+    with a1:
+        proc_click = st.button("📊 Processar Faturas Glosadas", type="primary", key="proc_glosas_btn")
+    with a2:
+        clear_click = st.button("🧹 Limpar / Resetar", key="clear_glosas_btn")
+
+    # ---------- Reset explícito ----------
+    if clear_click:
+        st.session_state.glosas_ready = False
+        st.session_state.glosas_data = None
+        st.session_state.glosas_colmap = None
+        st.session_state.glosas_files_sig = None
+        st.rerun()
+
+    # ---------- Processar quando clicado ----------
+    if proc_click:
+        if not glosas_files:
+            st.warning("Selecione pelo menos um arquivo .xlsx antes de processar.")
+        else:
+            files_sig = _files_signature(glosas_files)
+            # Executa o processamento (leitura + enriquecimento)
             df_g, colmap = read_glosas_xlsx(glosas_files)
-            if df_g.empty:
-                st.warning("Não foi possível ler os arquivos enviados.")
+
+            # Persiste no session_state
+            st.session_state.glosas_data = df_g
+            st.session_state.glosas_colmap = colmap
+            st.session_state.glosas_ready = True
+            st.session_state.glosas_files_sig = files_sig
+
+            # Reexecuta para renderizar a partir do estado persistido
+            st.rerun()
+
+    # ---------- Se há resultado processado no estado, usá-lo ----------
+    if st.session_state.glosas_ready and st.session_state.glosas_data is not None:
+        # Se os arquivos do uploader mudaram desde o processamento, avisar/invalidar
+        current_sig = _files_signature(glosas_files)
+        if (glosas_files and current_sig != st.session_state.glosas_files_sig):
+            st.info("Os arquivos enviados mudaram desde o último processamento. Clique em **Processar Faturas Glosadas** para atualizar.")
+        # Dados persistidos
+        df_g   = st.session_state.glosas_data
+        colmap = st.session_state.glosas_colmap
+
+        # ---------- Diagnóstico opcional ----------
+        with st.expander("🔧 Diagnóstico (debug rápido)", expanded=False):
+            st.write("**Colunas do DataFrame:**", list(df_g.columns))
+            st.write("**Mapeamento detectado (colmap):**")
+            st.json({k: v for k, v in colmap.items() if v})
+            st.write("**Amostra (5 linhas):**")
+            st.dataframe(df_g.head(5), use_container_width=True)
+            flags = {
+                "_pagto_dt": "_pagto_dt" in df_g.columns,
+                "_pagto_ym": "_pagto_ym" in df_g.columns,
+                "_pagto_mes_br": "_pagto_mes_br" in df_g.columns,
+            }
+            st.write("**Flags de Pagamento criadas?**", flags)
+
+        # ---------- Filtros (Convênio e Período por Pagamento) ----------
+        has_pagto = ("_pagto_dt" in df_g.columns) and df_g["_pagto_dt"].notna().any()
+        if not has_pagto:
+            st.warning("Coluna 'Pagamento' não encontrada ou sem dados válidos. Recursos mensais ficarão limitados.")
+
+        # Filtro por Convênio
+        conv_opts = ["(todos)"]
+        if colmap.get("convenio") and colmap["convenio"] in df_g.columns:
+            conv_unique = sorted(df_g[colmap["convenio"]].dropna().astype(str).unique().tolist())
+            conv_opts += conv_unique
+        conv_sel = st.selectbox("Convênio", conv_opts, index=0, key="conv_glosas")
+
+        # Filtro por Mês (Pagamento)
+        if has_pagto:
+            meses_df = (df_g.loc[df_g["_pagto_ym"].notna(), ["_pagto_ym","_pagto_mes_br"]]
+                          .drop_duplicates().sort_values("_pagto_ym"))
+            meses_labels = meses_df["_pagto_mes_br"].tolist()
+            modo_periodo = st.radio(
+                "Período (por **Pagamento**):",
+                ["Todos os meses (agrupado)", "Um mês"],
+                horizontal=False,
+                key="modo_periodo"
+            )
+            mes_sel_label = None
+            if modo_periodo == "Um mês" and meses_labels:
+                mes_sel_label = st.selectbox("Escolha o mês (Pagamento)", meses_labels, key="mes_pagto_sel")
+        else:
+            modo_periodo = "Todos os meses (agrupado)"
+            mes_sel_label = None
+
+        # ---------- Aplicar filtros no DataFrame de visualização ----------
+        df_view = df_g.copy()
+
+        if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
+            df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
+
+        if has_pagto and mes_sel_label:
+            df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
+
+        # ---------- Série mensal (Pagamento) ----------
+        st.markdown("### 📅 Glosa por **mês de pagamento**")
+        if has_pagto:
+            base_m = df_view[df_view["_is_glosa"] == True].copy()
+            if base_m.empty:
+                st.info("Sem glosas no recorte atual.")
             else:
-                # -----------------------------
-                # Diagnóstico opcional (expander)
-                # -----------------------------
-                with st.expander("🔧 Diagnóstico (debug rápido)", expanded=False):
-                    st.write("**Colunas do DataFrame:**", list(df_g.columns))
-                    st.write("**Mapeamento detectado (colmap):**")
-                    st.json({k: v for k, v in colmap.items() if v})
-                    st.write("**Amostra (5 linhas):**")
-                    st.dataframe(df_g.head(5), use_container_width=True)
-                    flags = {
-                        "_pagto_dt": "_pagto_dt" in df_g.columns,
-                        "_pagto_ym": "_pagto_ym" in df_g.columns,
-                        "_pagto_mes_br": "_pagto_mes_br" in df_g.columns,
-                    }
-                    st.write("**Flags de Pagamento criadas?**", flags)
-
-                # -----------------------------
-                # Filtros (Convênio e Período por Pagamento)
-                # -----------------------------
-                has_pagto = ("_pagto_dt" in df_g.columns) and df_g["_pagto_dt"].notna().any()
-                if not has_pagto:
-                    st.warning("Coluna 'Pagamento' não encontrada ou sem dados válidos. Recursos mensais ficarão limitados.")
-
-                # Convênio
-                conv_opts = ["(todos)"]
-                if colmap.get("convenio") and colmap["convenio"] in df_g.columns:
-                    conv_unique = sorted(df_g[colmap["convenio"]].dropna().astype(str).unique().tolist())
-                    conv_opts += conv_unique
-                conv_sel = st.selectbox("Convênio", conv_opts, index=0, key="conv_glosas")
-
-                # Período (Pagamento)
-                if has_pagto:
-                    meses_df = (df_g.loc[df_g["_pagto_ym"].notna(), ["_pagto_ym","_pagto_mes_br"]]
-                                  .drop_duplicates().sort_values("_pagto_ym"))
-                    meses_labels = meses_df["_pagto_mes_br"].tolist()
-                    modo_periodo = st.radio("Período (por **Pagamento**):",
-                                            ["Todos os meses (agrupado)", "Um mês"],
-                                            horizontal=False, key="modo_periodo")
-                    mes_sel_label = None
-                    if modo_periodo == "Um mês" and meses_labels:
-                        mes_sel_label = st.selectbox("Escolha o mês (Pagamento)", meses_labels, key="mes_pagto_sel")
+                if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                           Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
                 else:
-                    modo_periodo = "Todos os meses (agrupado)"
-                    mes_sel_label = None
+                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                           Valor_Cobrado=("_valor_glosa_abs","size")))
+                mensal = mensal.sort_values("_pagto_ym")
+                st.dataframe(
+                    apply_currency(mensal.rename(columns={
+                        "Valor_Glosado":"Valor Glosado (R$)",
+                        "Valor_Cobrado":"Valor Cobrado (R$)"
+                    }), ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
+                    use_container_width=True, height=260
+                )
+                try:
+                    st.bar_chart(
+                        mensal.set_index("_pagto_mes_br")[["Valor_Glosado"]]
+                              .rename(columns={"Valor_Glosado":"Valor Glosado (R$)"})
+                    )
+                except Exception:
+                    pass
+        else:
+            st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-                # -----------------------------
-                # Aplicar filtros
-                # -----------------------------
-                df_view = df_g.copy()
+        # ---------- KPIs e análises (pós-filtro) ----------
+        analytics = build_glosas_analytics(df_view, colmap)
+        if not analytics:
+            st.warning("Arquivos lidos, mas não foi possível identificar colunas mínimas.")
+        else:
+            k = analytics["kpis"]
 
-                if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
-                    df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
+            st.markdown("### 🔎 Visão geral (após filtros)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Registros", f"{k['linhas']:,}".replace(",", "."))
+            periodo_txt = ""
+            if k["periodo_ini"] is not None and k["periodo_fim"] is not None:
+                periodo_txt = f"{k['periodo_ini']:%d/%m/%Y} → {k['periodo_fim']:%d/%m/%Y}"
+            c2.metric("Período (Realizado)", periodo_txt or "—")
+            c3.metric("Convênios", f"{k['convenios']}")
+            c4.metric("Prestadores", f"{k['prestadores']}")
 
-                if has_pagto and mes_sel_label:
-                    df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
+            c5, c6, c7 = st.columns(3)
+            c5.metric("Valor Cobrado", f_currency(k["valor_cobrado"]))
+            c6.metric("Valor Glosado", f_currency(k["valor_glosado"]))
+            c7.metric("Taxa de Glosa", f"{(k['taxa_glosa']*100):.2f}%")
 
-                # -----------------------------
-                # Série mensal por Pagamento
-                # -----------------------------
-                st.markdown("### 📅 Glosa por **mês de pagamento**")
+            st.markdown("### 🧭 Situação de recurso")
+            colA, colB = st.columns(2)
+            with colA:
+                if not k["mantida"].empty:
+                    st.dataframe(k["mantida"], use_container_width=True, height=150)
+            with colB:
+                if not k["recupera"].empty:
+                    st.dataframe(k["recupera"], use_container_width=True, height=150)
+
+            st.markdown("### 🥇 Top motivos de glosa (por valor)")
+            mot = analytics["top_motivos"].head(20) if not analytics["top_motivos"].empty else pd.DataFrame()
+            if mot.empty:
+                st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
+            else:
+                st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+                try:
+                    chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                    st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
+                except Exception:
+                    pass
+
+            st.markdown("### 🧷 Tipo de glosa")
+            by_tipo = analytics["by_tipo"]
+            if by_tipo.empty:
+                st.info("Coluna de 'Tipo de Glosa' não encontrada.")
+            else:
+                st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+
+            st.markdown("### 👩‍💼 Analista — concentração de glosas")
+            by_analista = analytics["by_analista"].head(20)
+            if by_analista.empty:
+                st.info("Coluna de 'Analista Atual' não encontrada.")
+            else:
+                st.dataframe(apply_currency(by_analista, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+
+            st.markdown("### 🧩 Itens/descrições com maior valor glosado")
+            top_itens = analytics["top_itens"].head(20)
+            if top_itens.empty:
+                st.info("Coluna de 'Descrição' não encontrada.")
+            else:
+                st.dataframe(apply_currency(top_itens, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+
+            st.markdown("### 🏥 Convênios com maior valor glosado")
+            by_conv = analytics["by_convenio"].head(20)
+            if by_conv.empty:
+                st.info("Coluna de 'Convênio' não encontrada.")
+            else:
+                st.dataframe(apply_currency(by_conv, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+                try:
+                    chart_conv = by_conv.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
+                    st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
+                except Exception:
+                    pass
+
+            # ---------- Exportação (com filtros anotados) ----------
+            st.markdown("---")
+            st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as wr:
+                kpi_df = pd.DataFrame([{
+                    "Convênio (filtro)": conv_sel,
+                    "Modo Período": modo_periodo,
+                    "Mês (se aplicado)": mes_sel_label or "",
+                    "Registros": k["linhas"],
+                    "Período Início": k["periodo_ini"].strftime("%d/%m/%Y") if k["periodo_ini"] else "",
+                    "Período Fim": k["periodo_fim"].strftime("%d/%m/%Y") if k["periodo_fim"] else "",
+                    "Convênios": k["convenios"],
+                    "Prestadores": k["prestadores"],
+                    "Valor Cobrado (R$)": round(k["valor_cobrado"], 2),
+                    "Valor Glosado (R$)": round(k["valor_glosado"], 2),
+                    "Taxa de Glosa (%)": round(k["taxa_glosa"]*100, 2),
+                }])
+                kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
+
                 if has_pagto:
                     base_m = df_view[df_view["_is_glosa"] == True].copy()
-                    if base_m.empty:
-                        st.info("Sem glosas no recorte atual.")
+                    if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
+                        mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                          .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                               Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
                     else:
-                        if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                            mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                              .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                                   Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
-                        else:
-                            mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                              .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                                   Valor_Cobrado=("_valor_glosa_abs","size")))
-                        mensal = mensal.sort_values("_pagto_ym")
-                        st.dataframe(
-                            apply_currency(mensal.rename(columns={"Valor_Glosado":"Valor Glosado (R$)",
-                                                                  "Valor_Cobrado":"Valor Cobrado (R$)"}),
-                                           ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
-                            use_container_width=True, height=260
-                        )
+                        mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                          .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                               Valor_Cobrado=("_valor_glosa_abs","size")))
+                    mensal = mensal.sort_values("_pagto_ym")
+                    mensal.rename(columns={"_pagto_ym":"YYYY-MM","_pagto_mes_br":"Mês/Ano"}, inplace=True)
+                    mensal.to_excel(wr, index=False, sheet_name="Mensal_Pagamento")
+
+                if not k["mantida"].empty: k["mantida"].to_excel(wr, index=False, sheet_name="Mantida")
+                if not k["recupera"].empty: k["recupera"].to_excel(wr, index=False, sheet_name="Recupera")
+                if not analytics["top_motivos"].empty: analytics["top_motivos"].to_excel(wr, index=False, sheet_name="Top_Motivos")
+                if not analytics["by_tipo"].empty: analytics["by_tipo"].to_excel(wr, index=False, sheet_name="Tipo_Glosa")
+                if not analytics["by_analista"].empty: analytics["by_analista"].to_excel(wr, index=False, sheet_name="Analista")
+                if not analytics["top_itens"].empty: analytics["top_itens"].to_excel(wr, index=False, sheet_name="Top_Itens")
+                if not analytics["by_convenio"].empty: analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
+
+                col_export = [c for c in [
+                    colmap.get("data_pagamento"),
+                    colmap.get("data_realizado"),
+                    colmap.get("convenio"), colmap.get("prestador"),
+                    colmap.get("descricao"), colmap.get("tipo_glosa"),
+                    colmap.get("motivo"), colmap.get("desc_motivo"),
+                    colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
+                ] if c and c in df_view.columns]
+                raw = df_view[col_export].copy() if col_export else pd.DataFrame()
+                if not raw.empty:
+                    raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
+
+                # Ajustes visuais
+                for name in wr.sheets:
+                    ws = wr.sheets[name]
+                    ws.freeze_panes = "A2"
+                    for col in ws.columns:
                         try:
-                            st.bar_chart(mensal.set_index("_pagto_mes_br")[["Valor_Glosado"]]
-                                              .rename(columns={"Valor_Glosado":"Valor Glosado (R$)"}))
+                            col_letter = col[0].column_letter
                         except Exception:
-                            pass
-                else:
-                    st.info("Sem 'Pagamento' válido para montar série mensal.")
+                            continue
+                        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+                        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
 
-                # -----------------------------
-                # KPIs e análises (pós-filtro)
-                # -----------------------------
-                analytics = build_glosas_analytics(df_view, colmap)
-                if not analytics:
-                    st.warning("Arquivos lidos, mas não foi possível identificar colunas mínimas.")
-                else:
-                    k = analytics["kpis"]
+            st.download_button(
+                "⬇️ Baixar análise (XLSX)",
+                data=buf.getvalue(),
+                file_name="analise_faturas_glosadas.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-                    st.markdown("### 🔎 Visão geral (após filtros)")
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Registros", f"{k['linhas']:,}".replace(",", "."))
-                    periodo_txt = ""
-                    if k["periodo_ini"] is not None and k["periodo_fim"] is not None:
-                        periodo_txt = f"{k['periodo_ini']:%d/%m/%Y} → {k['periodo_fim']:%d/%m/%Y}"
-                    c2.metric("Período (Realizado)", periodo_txt or "—")
-                    c3.metric("Convênios", f"{k['convenios']}")
-                    c4.metric("Prestadores", f"{k['prestadores']}")
-
-                    c5, c6, c7 = st.columns(3)
-                    c5.metric("Valor Cobrado", f_currency(k["valor_cobrado"]))
-                    c6.metric("Valor Glosado", f_currency(k["valor_glosado"]))
-                    c7.metric("Taxa de Glosa", f"{(k['taxa_glosa']*100):.2f}%")
-
-                    st.markdown("### 🧭 Situação de recurso")
-                    colA, colB = st.columns(2)
-                    with colA:
-                        if not k["mantida"].empty:
-                            st.dataframe(k["mantida"], use_container_width=True, height=150)
-                    with colB:
-                        if not k["recupera"].empty:
-                            st.dataframe(k["recupera"], use_container_width=True, height=150)
-
-                    st.markdown("### 🥇 Top motivos de glosa (por valor)")
-                    mot = analytics["top_motivos"].head(20) if not analytics["top_motivos"].empty else pd.DataFrame()
-                    if mot.empty:
-                        st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
-                    else:
-                        st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-                        try:
-                            chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                            st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
-                        except Exception:
-                            pass
-
-                    st.markdown("### 🧷 Tipo de glosa")
-                    by_tipo = analytics["by_tipo"]
-                    if by_tipo.empty:
-                        st.info("Coluna de 'Tipo de Glosa' não encontrada.")
-                    else:
-                        st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
-
-                    st.markdown("### 👩‍💼 Analista — concentração de glosas")
-                    by_analista = analytics["by_analista"].head(20)
-                    if by_analista.empty:
-                        st.info("Coluna de 'Analista Atual' não encontrada.")
-                    else:
-                        st.dataframe(apply_currency(by_analista, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-
-                    st.markdown("### 🧩 Itens/descrições com maior valor glosado")
-                    top_itens = analytics["top_itens"].head(20)
-                    if top_itens.empty:
-                        st.info("Coluna de 'Descrição' não encontrada.")
-                    else:
-                        st.dataframe(apply_currency(top_itens, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-
-                    st.markdown("### 🏥 Convênios com maior valor glosado")
-                    by_conv = analytics["by_convenio"].head(20)
-                    if by_conv.empty:
-                        st.info("Coluna de 'Convênio' não encontrada.")
-                    else:
-                        st.dataframe(apply_currency(by_conv, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-                        try:
-                            chart_conv = by_conv.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                            st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
-                        except Exception:
-                            pass
-
-                    # Exportação
-                    st.markdown("---")
-                    st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
-                    from io import BytesIO
-                    buf = BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as wr:
-                        kpi_df = pd.DataFrame([{
-                            "Convênio (filtro)": conv_sel,
-                            "Modo Período": modo_periodo,
-                            "Mês (se aplicado)": mes_sel_label or "",
-                            "Registros": k["linhas"],
-                            "Período Início": k["periodo_ini"].strftime("%d/%m/%Y") if k["periodo_ini"] else "",
-                            "Período Fim": k["periodo_fim"].strftime("%d/%m/%Y") if k["periodo_fim"] else "",
-                            "Convênios": k["convenios"],
-                            "Prestadores": k["prestadores"],
-                            "Valor Cobrado (R$)": round(k["valor_cobrado"], 2),
-                            "Valor Glosado (R$)": round(k["valor_glosado"], 2),
-                            "Taxa de Glosa (%)": round(k["taxa_glosa"]*100, 2),
-                        }])
-                        kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
-
-                        if has_pagto:
-                            base_m = df_view[df_view["_is_glosa"] == True].copy()
-                            if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                                mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                                  .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                                       Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
-                            else:
-                                mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                                  .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                                       Valor_Cobrado=("_valor_glosa_abs","size")))
-                            mensal = mensal.sort_values("_pagto_ym")
-                            mensal.rename(columns={"_pagto_ym":"YYYY-MM","_pagto_mes_br":"Mês/Ano"}, inplace=True)
-                            mensal.to_excel(wr, index=False, sheet_name="Mensal_Pagamento")
-
-                        if not k["mantida"].empty: k["mantida"].to_excel(wr, index=False, sheet_name="Mantida")
-                        if not k["recupera"].empty: k["recupera"].to_excel(wr, index=False, sheet_name="Recupera")
-                        if not analytics["top_motivos"].empty: analytics["top_motivos"].to_excel(wr, index=False, sheet_name="Top_Motivos")
-                        if not analytics["by_tipo"].empty: analytics["by_tipo"].to_excel(wr, index=False, sheet_name="Tipo_Glosa")
-                        if not analytics["by_analista"].empty: analytics["by_analista"].to_excel(wr, index=False, sheet_name="Analista")
-                        if not analytics["top_itens"].empty: analytics["top_itens"].to_excel(wr, index=False, sheet_name="Top_Itens")
-                        if not analytics["by_convenio"].empty: analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
-
-                        col_export = [c for c in [
-                            colmap.get("data_pagamento"),
-                            colmap.get("data_realizado"),
-                            colmap.get("convenio"), colmap.get("prestador"),
-                            colmap.get("descricao"), colmap.get("tipo_glosa"),
-                            colmap.get("motivo"), colmap.get("desc_motivo"),
-                            colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
-                        ] if c and c in df_view.columns]
-                        raw = df_view[col_export].copy() if col_export else pd.DataFrame()
-                        if not raw.empty:
-                            raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
-
-                        for name in wr.sheets:
-                            ws = wr.sheets[name]
-                            ws.freeze_panes = "A2"
-                            for col in ws.columns:
-                                try:
-                                    col_letter = col[0].column_letter
-                                except Exception:
-                                    continue
-                                max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-                                ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
-
-                    st.download_button(
-                        "⬇️ Baixar análise (XLSX)",
-                        data=buf.getvalue(),
-                        file_name="analise_faturas_glosadas.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+    # ---------- Sem arquivos e sem processamento ----------
+    if not glosas_files and not st.session_state.glosas_ready:
+        st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
