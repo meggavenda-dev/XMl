@@ -98,149 +98,87 @@ def js_safe_click(driver, by, value, timeout=30, retries=3):
             time.sleep(1.5)
 
 
-def _entrar_amhptiss(driver, wait, wait_after=8):
-    """
-    Após login, entra no módulo AMHPTISS (ou TISS) e troca para a nova aba/janela.
-    Também remove overlays/modais que atrapalham clique.
-    """
-    # Tenta clicar no botão/entrada para abrir o módulo (varia de ambiente)
+def _entrar_amhptiss(driver, wait, wait_after=12):
+    """Aumentada a espera e melhorada a detecção de aba para o Streamlit Cloud."""
     try:
-        btn_tiss = WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'AMHPTISS')]"))
-        )
+        # Tenta localizar o botão AMHPTISS por texto ou ID
+        btn_tiss = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'AMHPTISS')]")))
         driver.execute_script("arguments[0].click();", btn_tiss)
     except Exception:
-        # Fallback: qualquer elemento que contenha “TISS”
-        elems = driver.find_elements(
-            By.XPATH,
-            "//*[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TISS')]"
-        )
-        if elems:
-            driver.execute_script("arguments[0].click();", elems[0])
-        else:
-            # em alguns perfis já cai direto no AMHPTISS; segue...
-            pass
+        # Fallback para qualquer elemento que mencione TISS
+        elems = driver.find_elements(By.XPATH, "//*[contains(text(), 'TISS')]")
+        if elems: driver.execute_script("arguments[0].click();", elems[0])
 
     time.sleep(wait_after)
+    # Garante que mudou para a aba que abriu
     if len(driver.window_handles) > 1:
         driver.switch_to.window(driver.window_handles[-1])
-
-    # Remove overlays/chat/modais informativos que bloqueiam cliques
-    try:
-        driver.execute_script("""
-            const avisos = document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container');
-            avisos.forEach(el => el.remove());
-        """)
-    except Exception:
-        pass
-
+    
+    # Limpeza de overlays que travam o clique
+    driver.execute_script("""
+        document.querySelectorAll('center, #fechar-informativo, .modal, .swal2-container').forEach(el => el.remove());
+    """)
 
 def _ir_para_atendimentos(driver, wait):
-    """
-    A partir do AMHPTISS, abre o menu 'IrPara' -> 'Consultório' -> 'AtendimentosRealizados.aspx'
-    com clique seguro.
-    """
-    try:
-        # Alguns perfis precisam do clique por JS no IrPara
-        btn_ir = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "IrPara")))
-        driver.execute_script("arguments[0].click();", btn_ir)
-    except Exception:
-        # fallback tenta o mesmo com o safe_click
-        js_safe_click(driver, By.ID, "IrPara")
-
+    """Adicionado retry para o menu IrPara."""
+    js_safe_click(driver, By.ID, "IrPara", timeout=40)
+    time.sleep(1.5)
     js_safe_click(driver, By.XPATH, "//span[normalize-space()='Consultório']")
+    time.sleep(1)
     js_safe_click(driver, By.XPATH, "//a[@href='AtendimentosRealizados.aspx']")
-    WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
-
-
+    # Aguarda o carregamento inicial da página de busca
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
 def extrair_detalhes_site_amhp(numero_guia):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 40)
+    wait = WebDriverWait(driver, 50) # Aumentado para 50 segundos
     dados = {}
     try:
-        # 1) Login
         driver.get("https://portal.amhp.com.br/")
+        # Login
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        # 2) Entrar no AMHPTISS e garantir janela/tela correta + overlays removidos
-        _entrar_amhptiss(driver, wait, wait_after=8)
-
-        # 3) Navegar até Atendimentos
+        _entrar_amhptiss(driver, wait)
         _ir_para_atendimentos(driver, wait)
 
-        # 4) Buscar a guia
-        # (Em alguns ambientes o ID muda. Vamos tentar ambos.)
-        input_ids_possiveis = [
-            "ctl00_MainContent_rtbNumeroAtendimento",  # mais comum
-            "ctl00_MainContent_rtbNumeroGuia",         # fallback
-        ]
-        input_busca = None
-        for cand in input_ids_possiveis:
-            try:
-                input_busca = wait.until(EC.presence_of_element_located((By.ID, cand)))
-                break
-            except Exception:
-                continue
-
-        if not input_busca:
-            raise RuntimeError("Campo de busca de guia não foi localizado (IDs conhecidos não encontrados).")
-
-        # Limpa e digita
+        # Busca da Guia
+        input_busca = wait.until(EC.visibility_of_element_located((By.ID, "ctl00_MainContent_rtbNumeroAtendimento")))
         input_busca.clear()
         input_busca.send_keys(str(numero_guia).strip())
-
-        # Guardar referência da tabela antes de buscar (para esperar recarregar)
-        old_table = None
-        try:
-            old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
-        except Exception:
-            pass
-
-        # Clicar Buscar (JS)
+        
+        # Referência para detecção de recarregamento
+        old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
+        
         btn_buscar = driver.find_element(By.ID, "ctl00_MainContent_btnBuscar_input")
         driver.execute_script("arguments[0].click();", btn_buscar)
 
-        # Aguarda recarregar: (a) staleness da tabela anterior, (b) nova tabela presente
-        if old_table is not None:
-            try:
-                WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
-            except Exception:
-                pass
-
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
-
-        # 5) Aguardar link da guia aparecer e clicar
+        # Sincronização AJAX: Espera a tabela antiga sumir ou mudar
+        time.sleep(5) 
+        
+        # Clica na guia encontrada
         xpath_guia = f"//a[contains(text(), '{str(numero_guia).strip()}')]"
         link_guia = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_guia)))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
         driver.execute_script("arguments[0].click();", link_guia)
 
-        # 6) Coletar os dados
+        # Coleta Final
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(1.5)  # pequeno respiro pós render
-
+        time.sleep(2)
+        
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
-
-        tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
-        html_tabela = tabela_el.get_attribute('outerHTML')
+        
+        html_tabela = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable").get_attribute('outerHTML')
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
         return dados
 
     except Exception as e:
-        try:
-            driver.save_screenshot("erro_conexao_portal.png")
-        except Exception:
-            pass
-        return {"erro": f"{e.__class__.__name__}: {e}"}
+        try: driver.save_screenshot("erro_timeout.png")
+        except: pass
+        return {"erro": f"Tempo esgotado ou falha no portal: {str(e)}"}
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        driver.quit()
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
 def modal_amhptiss_site(n_guia):
