@@ -245,75 +245,134 @@ def extrair_detalhes_site_amhp(numero_guia):
         wait.until(EC.presence_of_element_located((By.ID, "input-9"))).send_keys(st.secrets["credentials"]["usuario"])
         driver.find_element(By.ID, "input-12").send_keys(st.secrets["credentials"]["senha"] + Keys.ENTER)
 
-        # 2) Entrar AMHPTISS e limpar overlays
+        # 2) AMHPTISS
         _entrar_amhptiss(driver, wait, wait_after=10)
 
-        # 3) Navegar até a tela de Atendimentos
+        # 3) Atendimentos
         _ir_para_atendimentos(driver, wait)
 
-        # 4) Campo de busca (com suporte a iframe e a 2 IDs possíveis)
-        driver.switch_to.default_content()
-
-        valor_busca = re.sub(r"\D+", "", str(numero_guia).strip())  # sanitiza: só dígitos
-
-        input_locators = [
-            (By.ID, "ctl00_MainContent_rtbNumeroGuia"),
-            (By.ID, "ctl00_MainContent_rtbNumeroAtendimento"),
+        # ========== 4) Campo de busca (ficar no MESMO iframe até buscar) ==========
+        valor_solicitado = re.sub(r"\D+", "", str(numero_guia).strip())
+        input_ids = [
+            "ctl00_MainContent_rtbNumeroAtendimento",   # seu caso
+            "ctl00_MainContent_rtbNumeroGuia",          # fallback
         ]
-        input_used = None
-        for loc in input_locators:
+
+        # Tenta localizar o input em qualquer iframe (e permanece nele)
+        campo_loc = None
+        for iid in input_ids:
             try:
                 driver.switch_to.default_content()
-                _switch_to_iframe_that_contains(driver, loc[0], loc[1], timeout=10)
-                wait.until(EC.visibility_of_element_located(loc))
-                input_used = loc
+                _switch_to_iframe_that_contains(driver, By.ID, iid, timeout=12)
+                el = wait.until(EC.visibility_of_element_located((By.ID, iid)))
+                campo_loc = (By.ID, iid)
                 break
             except Exception:
                 continue
+        if not campo_loc:
+            raise RuntimeError("Campo de busca (Atendimento/Guia) não localizado — verifique se há outro iframe.")
 
-        if not input_used:
-            raise RuntimeError("Campo de busca não localizado (Guia/Atendimento) — verifique DOM/iframe no dump HTML.")
-
-        # Digitação robusta (RadInput)
-        ok = _force_type_in_radinput(driver, wait, input_used, valor_busca, must_tab=True, also_press_enter=False)
-
-        # Lê o que ficou no input (debug)
-        try:
-            el_chk = driver.find_element(*input_used)
-            valor_no_campo = (el_chk.get_attribute("value") or "").strip()
-        except Exception:
-            valor_no_campo = "(não foi possível ler)"
-
-        # Se não colou, força via JS + eventos
-        if (valor_no_campo != valor_busca) or (not ok):
+        # Digita com reforços (RadInput)
+        def _type_and_read():
+            el = wait.until(EC.element_to_be_clickable(campo_loc))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
             try:
-                el_force = driver.find_element(*input_used)
+                el.click()
+            except:
+                driver.execute_script("arguments[0].click();", el)
+
+            # Limpesa + digitação
+            try:
+                el.send_keys(Keys.CONTROL, 'a')
+                el.send_keys(Keys.DELETE)
+            except:
+                pass
+            el.send_keys(valor_solicitado)
+            el.send_keys(Keys.TAB)     # blur valida RadInput
+            time.sleep(0.25)
+
+            # Lê via atributo + JS (às vezes get_attribute não reflete sem blur)
+            val_attr = (el.get_attribute("value") or "").strip()
+            val_js = driver.execute_script("return arguments[0].value;", el)
+            val_js = (val_js or "").strip()
+            return val_attr, val_js
+
+        val_attr, val_js = _type_and_read()
+        valor_no_campo = val_js or val_attr
+
+        # Se não colou, tenta API do Telerik ($find) e dispara eventos internos
+        if valor_no_campo != valor_solicitado:
+            try:
+                # tenta descobrir o ClientID do controle (geralmente igual ao ID do input)
+                client_id = campo_loc[1]
                 driver.execute_script("""
-                    const el = arguments[0], v = arguments[1];
-                    el.value = v;
-                    el.dispatchEvent(new Event('input', {bubbles:true}));
-                    el.dispatchEvent(new Event('change', {bubbles:true}));
-                    el.dispatchEvent(new Event('blur', {bubbles:true}));
-                """, el_force, valor_busca)
+                    try {
+                        var ctl = window.$find && window.$find(arguments[0]);
+                        if (ctl && ctl.set_value) {
+                            ctl.set_value(arguments[1]);      // define valor
+                            if (ctl._textBoxElement) {
+                                ctl._textBoxElement.value = arguments[1];
+                                ctl._raiseTextChanged();      // notifica mudança
+                                ctl._onTextboxBlur();         // emula blur
+                            }
+                        } else {
+                            var el = document.getElementById(arguments[0]);
+                            if (el) {
+                                el.value = arguments[1];
+                                el.dispatchEvent(new Event('input', {bubbles:true}));
+                                el.dispatchEvent(new Event('change', {bubbles:true}));
+                                el.dispatchEvent(new Event('blur', {bubbles:true}));
+                            }
+                        }
+                    } catch(e) {}
+                """, client_id, valor_solicitado)
                 time.sleep(0.3)
-                valor_no_campo = (el_force.get_attribute("value") or "").strip()
+                # Revalidar
+                el2 = wait.until(EC.visibility_of_element_located(campo_loc))
+                val_attr = (el2.get_attribute("value") or "").strip()
+                val_js = driver.execute_script("return arguments[0].value;", el2)
+                valor_no_campo = (val_js or val_attr or "").strip()
             except Exception:
                 pass
 
-        # 5) Guardar referência da tabela antes da busca (se existir)
+        # Como último recurso (teimosia), manda ENTER
+        if valor_no_campo != valor_solicitado:
+            try:
+                el3 = wait.until(EC.visibility_of_element_located(campo_loc))
+                el3.send_keys(Keys.ENTER)
+                time.sleep(0.3)
+                val_attr = (el3.get_attribute("value") or "").strip()
+                val_js = driver.execute_script("return arguments[0].value;", el3)
+                valor_no_campo = (val_js or val_attr or "").strip()
+            except:
+                pass
+
+        if valor_no_campo != valor_solicitado:
+            raise RuntimeError(f"O campo não aceitou o valor solicitado. Input atual: '{valor_no_campo}'.")
+
+        # ========== 5) Buscar no MESMO iframe ==========
+        # Guardar grid atual (se existir) antes do clique
         try:
             old_table = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
         except Exception:
             old_table = None
 
-        # 6) Clique em Buscar (o botão pode estar em outro iframe)
-        driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_btnBuscar_input", timeout=8)
-        btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, "ctl00_MainContent_btnBuscar_input")))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_buscar)
-        driver.execute_script("arguments[0].click();", btn_buscar)
+        # botão Buscar costuma estar no mesmo iframe do input; se não estiver, caímos no fallback
+        def _click_buscar():
+            btn_id = "ctl00_MainContent_btnBuscar_input"
+            try:
+                btn = wait.until(EC.element_to_be_clickable((By.ID, btn_id)))
+            except Exception:
+                # fallback: procura o botão em outro iframe
+                driver.switch_to.default_content()
+                _switch_to_iframe_that_contains(driver, By.ID, btn_id, timeout=8)
+                btn = wait.until(EC.element_to_be_clickable((By.ID, btn_id)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+            driver.execute_script("arguments[0].click();", btn)
 
-        # 7) Sincronização pós-busca (AJAX)
+        _click_buscar()
+
+        # ========== 6) Sincronização AJAX ==========
         if old_table is not None:
             try:
                 WebDriverWait(driver, 30).until(EC.staleness_of(old_table))
@@ -327,42 +386,41 @@ def extrair_detalhes_site_amhp(numero_guia):
             pass
 
         driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=10)
+        _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=12)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rgMasterTable")))
 
-        # 8) Clicar no resultado (guia)
-        num = valor_busca
-        # (a) link <a> contendo o número
+        # ========== 7) Abrir a guia pelo resultado ==========
+        num = valor_solicitado
         try:
-            link_guia = wait.until(EC.element_to_be_clickable((
+            link = wait.until(EC.element_to_be_clickable((
                 By.XPATH, f"//table[contains(@class,'rgMasterTable')]//a[contains(normalize-space(.), '{num}')]"
             )))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_guia)
-            driver.execute_script("arguments[0].click();", link_guia)
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link)
+            driver.execute_script("arguments[0].click();", link)
         except TimeoutException:
-            # (b) fallback: TR que possui uma TD com o número; clica no primeiro <a> da linha
+            # fallback: clica na linha que contém o número
             linha = wait.until(EC.presence_of_element_located((
                 By.XPATH, f"//table[contains(@class,'rgMasterTable')]//tr[.//td[contains(normalize-space(.), '{num}')]]"
             )))
             try:
-                link_na_linha = linha.find_element(By.XPATH, ".//a")
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link_na_linha)
-                driver.execute_script("arguments[0].click();", link_na_linha)
+                a = linha.find_element(By.XPATH, ".//a")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", a)
+                driver.execute_script("arguments[0].click();", a)
             except Exception:
                 driver.execute_script("arguments[0].click();", linha)
 
-        # 9) Coleta final
+        # ========== 8) Coleta dos detalhes ==========
         driver.switch_to.default_content()
-        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=10)
+        _switch_to_iframe_that_contains(driver, By.ID, "ctl00_MainContent_txtNomeBeneficiario", timeout=12)
         wait.until(EC.presence_of_element_located((By.ID, "ctl00_MainContent_txtNomeBeneficiario")))
-        time.sleep(1.0)
+        time.sleep(0.8)
 
         dados['paciente'] = driver.find_element(By.ID, "ctl00_MainContent_txtNomeBeneficiario").get_attribute("value")
         dados['data'] = driver.find_element(By.ID, "ctl00_MainContent_dtDataAtendimento_dateInput").get_attribute("value")
 
-        # Tabela de itens (pode estar no mesmo iframe)
+        # Tabela de itens
         try:
-            _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=5)
+            _switch_to_iframe_that_contains(driver, By.CSS_SELECTOR, ".rgMasterTable", timeout=6)
         except Exception:
             pass
         tabela_el = driver.find_element(By.CSS_SELECTOR, ".rgMasterTable")
@@ -370,7 +428,7 @@ def extrair_detalhes_site_amhp(numero_guia):
         dados['itens'] = pd.read_html(io.StringIO(html_tabela))[0]
 
         # Debug
-        dados['debug_numero_solicitado'] = valor_busca
+        dados['debug_numero_solicitado'] = valor_solicitado
         dados['debug_valor_no_input'] = valor_no_campo
 
         return dados
@@ -397,6 +455,7 @@ def extrair_detalhes_site_amhp(numero_guia):
             driver.quit()
         except Exception:
             pass
+
 
 
 @st.dialog("📋 Detalhes Direto do Portal AMHP", width="large")
