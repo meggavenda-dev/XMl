@@ -1590,56 +1590,32 @@ with tab_glosas:
             st.session_state.setdefault("amhp_query", "")
             st.session_state.setdefault("amhp_result", None)
 
+            # --- DENTRO DA ABA DE FATURAS GLOSADAS ---
+
             st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
             st.markdown("---")
-
-            if not amhp_col or amhp_col not in df_g.columns:
-                st.info("Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados.")
-            else:
-                col1, col2 = st.columns([0.65, 0.35])
-                with col1:
-                    numero_input = st.text_input(
-                        "Informe o Nº AMHPTISS",
-                        value=st.session_state.amhp_query,
-                        placeholder="Ex.: 61916098"
-                    )
-                    cbt1, cbt2 = st.columns(2)
-                    with cbt1:
-                        clique_buscar = st.button("🔍 Buscar", key="btn_buscar_amhp")
-                    with cbt2:
-                        clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhp")
-                with col2:
-                    ignorar_filtros = st.checkbox(
-                        "Ignorar filtros de Convênio/Mês",
-                        False,
-                        help="Busca no dataset completo, ignorando filtros ativos."
-                    )
-
-                def digits(s): return re.sub(r"\D+", "", str(s or ""))
-
-                if clique_fechar:
-                    st.session_state.amhp_query = ""
-                    st.session_state.amhp_result = None
-                    st.rerun()
-
-                if clique_buscar:
-                    num = digits(numero_input)
-                    if not num:
-                        st.warning("Digite um Nº AMHPTISS válido.")
-                    else:
+            
+            # 1. Lógica de Interrupção Imediata (Fechar Busca)
+            if st.button("❌ Fechar resultados", key="btn_fechar_amhp"):
+                st.session_state.amhp_query = ""
+                st.session_state.amhp_result = None
+                st.rerun() # Interrompe aqui e recomeça limpo
+            
+            col1, col2 = st.columns([0.65, 0.35])
+            with col1:
+                numero_input = st.text_input("Informe o Nº AMHPTISS", value=st.session_state.amhp_query)
+                if st.button("🔍 Buscar", key="btn_buscar_amhp"):
+                    num = re.sub(r"\D+", "", str(numero_input))
+                    if num:
                         st.session_state.amhp_query = num
                         base = df_g if ignorar_filtros else df_view
-                
+                        # Busca indexada extremamente rápida
                         if num in amhp_index:
-                            idx = amhp_index[num]
-                            idx_validos = [i for i in idx if i in base.index]
-                            if idx_validos:
-                                result = base.loc[idx_validos]
-                            else:
-                                result = pd.DataFrame()
+                            idx_validos = [i for i in amhp_index[num] if i in base.index]
+                            st.session_state.amhp_result = base.loc[idx_validos]
                         else:
-                            result = pd.DataFrame()
-                        st.session_state.amhp_result = result
+                            st.session_state.amhp_result = pd.DataFrame()
+                        st.rerun()
 
                 result = st.session_state.amhp_result
                 numero_alvo = st.session_state.amhp_query
