@@ -1498,13 +1498,19 @@ with tab_glosas:
                         st.warning("Digite um Nº AMHPTISS válido.")
                     else:
                         st.session_state.amhp_query = num
-                        base = df_g if ignorar_filtros else df_view
+                        base = df_g if ignorar_filtros else df_view                        
                         if num in amhp_index:
                             idx = amhp_index[num]
-                            result = base.loc[idx]
+                        
+                            # 🛠 evita KeyError — mantém só os índices que realmente existem no df filtrado
+                            idx_validos = [i for i in idx if i in base.index]
+                        
+                            if idx_validos:
+                                result = base.loc[idx_validos]
+                            else:
+                                result = pd.DataFrame()   # nenhum item dessa guia dentro dos filtros
                         else:
                             result = pd.DataFrame()
-                        st.session_state.amhp_result = result
 
                 result = st.session_state.amhp_result
                 numero_alvo = st.session_state.amhp_query
