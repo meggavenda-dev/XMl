@@ -750,137 +750,152 @@ def _pick_col(df: pd.DataFrame, *candidates):
     return None
 
 
+
 @st.cache_data(show_spinner=False)
 def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     """
-    Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP ou similar),
-    concatena e retorna (df, colmap) com mapeamento de colunas.
-    Cria sempre colunas de Pagamento derivadas (_pagto_dt/_ym/_mes_br).
+    Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP/similar), concatena e retorna (df, colmap).
+    Mantém:
+      • override: 'Valor Cobrado' passa a usar 'Valor Original' (se existir)
+      • datas: cria _pagto_dt/_pagto_ym/_pagto_mes_br
+      • flags: _is_glosa, _valor_glosa_abs
+      • normalização AMHPTISS (cria _amhp_digits uma única vez)
 
-    Correções:
-      • "Valor Cobrado" passa a usar "Valor Original" (override)
-      • "Realizado": NÃO combinar com "Horário". Só coluna exatamente "Realizado".
-        Se houver duplicatas, usa a ÚLTIMA.
+    Performance:
+      • Lê somente as colunas realmente usadas pela aba (usecols)
+      • Conversões vetorizadas (datas/valores)
+      • Menos cópias e regex
+      • Cache por assinatura dos arquivos
     """
     if not files:
         return pd.DataFrame(), {}
 
+    # ---- colunas necessárias para todas as funcionalidades da aba ----
+    # (nomes conforme aparecem no seu XLSX)
+    USECOLS = [
+        "Convênio", "Paciente", "Cobrança",
+        "Nome Clínica", "Prestador", "Conferente",
+        "Procedimento", "Quantidade", "Descrição", "Tabela",
+        "Realizado", "Pagamento", "Mês",
+        "Valor Cobrado", "Valor Original", "Valor Glosa", "Valor Recursado",
+        "Tipo de Glosa", "Motivo Glosa", "Descricao Glosa",
+        "Amhptiss", "Nota Fiscal"
+    ]
+
     parts = []
+    # leitura enxuta + tipos menos custosos; pandas faz o cast exato depois
+    # OBS: alguns provedores podem não ter todas as colunas — caímos para fallback
     for f in files:
-        df = pd.read_excel(f, engine="openpyxl")
+        try:
+            df = pd.read_excel(
+                f, engine="openpyxl", usecols=USECOLS
+            )
+        except Exception:
+            # fallback: lê tudo e filtra depois (mantém compatibilidade com outros layouts)
+            df_full = pd.read_excel(f, engine="openpyxl")
+            # alinhar nomes (strip) e filtrar somente o que nos interessa
+            df_full.columns = [str(c).strip() for c in df_full.columns]
+            keep = [c for c in USECOLS if c in df_full.columns]
+            df = df_full[keep].copy()
+        # padroniza já na entrada
         df.columns = [str(c).strip() for c in df.columns]
         parts.append(df)
 
+    if not parts:
+        return pd.DataFrame(), {}
+
     df = pd.concat(parts, ignore_index=True)
-    cols = df.columns
 
-    # ---------- Mapeamento inicial ----------
-    
-    colmap = {
-        "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
-        "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
-        "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
-        "data_pagamento": next((c for c in cols if "Pagamento" in str(c)), None),
-        "data_realizado": None,  # será definido com critério robusto abaixo
-        "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
-        "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
-        "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
-        "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
-        # 👇 NOVO: mapeia Procedimento (código). Tenta vários rótulos comuns.
-                # Código / Procedimento / TUSS / Item
-        "procedimento": _pick_col(
-            df,
-            "procedimento",
-            "código",
-            "codigo",
-            "cód procedimento",
-            "cod procedimento",
-            "cod. procedimento",
-            "procedimento tuss",
-            "tuss",
-            "cod tuss",
-            "codigo tuss",
-            "item",
-            "codigo item",
-            "código item"
-        ),
-        "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
-        "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
-        "amhptiss": next((
-            c for c in cols
-            if str(c).strip().lower() in {
-                "amhptiss", "amhp tiss", "nº amhptiss", "numero amhptiss", "número amhptiss"
-            } or "amhptiss" in str(c).strip().lower() or str(c).strip() == "Amhptiss"
-        ), None),
-        "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
-    }
-
-
-    # ---------- "Realizado" robusto (sem "Horário") ----------
-    norm_cols = [(c, re.sub(r"\s+", " ", str(c)).strip().lower()) for c in cols]
-    realizado_exact = [c for c, n in norm_cols if n == "realizado"]
-    if not realizado_exact:
-        realizado_contains = [c for c, n in norm_cols if ("realizado" in n) and ("horar" not in n)]
+    # ---------------- Normalizações rápidas e vetorizadas ----------------
+    # 1) Datas
+    if "Realizado" in df.columns:
+        df["Realizado"] = pd.to_datetime(df["Realizado"], errors="coerce", dayfirst=True)
     else:
-        realizado_contains = []
-    if realizado_exact:
-        col_data_realizado = realizado_exact[-1]
-    elif realizado_contains:
-        col_data_realizado = realizado_contains[-1]
-    else:
-        col_data_realizado = None
-    colmap["data_realizado"] = col_data_realizado
+        df["Realizado"] = pd.NaT
 
-    # ---------- "Valor Cobrado" ← "Valor Original" ----------
-    col_valor_original = next((c for c in cols if str(c).strip().lower() == "valor original"), None)
-    if col_valor_original:
-        colmap["valor_original"] = col_valor_original
-        if colmap["valor_cobrado"] and colmap["valor_cobrado"] in df.columns:
-            df[colmap["valor_cobrado"]] = df[col_valor_original]
-        else:
-            colmap["valor_cobrado"] = col_valor_original
-
-    # ---------- Normalização AMHPTISS ----------
-    amhp_col = colmap.get("amhptiss")
-    if amhp_col and amhp_col in df.columns:
-        df[amhp_col] = (
-            df[amhp_col]
-            .astype(str)
-            .str.replace(r"[^\d]", "", regex=True)
-            .str.strip()
-        )
-
-    # ---------- Números ----------
-    for c in [colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")]:
-        if c and c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # ---------- Datas ----------
-    if colmap.get("data_realizado") and colmap["data_realizado"] in df.columns:
-        df[colmap["data_realizado"]] = pd.to_datetime(
-            df[colmap["data_realizado"]], errors="coerce", dayfirst=True
-        )
-    if colmap.get("data_pagamento") and colmap["data_pagamento"] in df.columns:
-        df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce", dayfirst=True)
+    if "Pagamento" in df.columns:
+        df["_pagto_dt"] = pd.to_datetime(df["Pagamento"], errors="coerce", dayfirst=True)
     else:
         df["_pagto_dt"] = pd.NaT
 
-    if "_pagto_dt" in df.columns and df["_pagto_dt"].notna().any():
+    if df["_pagto_dt"].notna().any():
         df["_pagto_ym"] = df["_pagto_dt"].dt.to_period("M")
         df["_pagto_mes_br"] = df["_pagto_dt"].dt.strftime("%m/%Y")
     else:
         df["_pagto_ym"] = pd.NaT
         df["_pagto_mes_br"] = ""
 
-    # ---------- Flags de glosa ----------
-    if colmap.get("valor_glosa") in df.columns:
-        df["_is_glosa"] = df[colmap["valor_glosa"]] < 0
-        df["_valor_glosa_abs"] = df[colmap["valor_glosa"]].abs()
+    # 2) Números
+    def _to_num(s):
+        return pd.to_numeric(s, errors="coerce")
+
+    if "Valor Original" in df.columns:
+        # override preservado: Valor Cobrado sempre passa a ser 'Valor Original'
+        if "Valor Cobrado" in df.columns:
+            df["Valor Cobrado"] = df["Valor Original"]
+        else:
+            df["Valor Cobrado"] = df["Valor Original"]
+
+    for c in ["Valor Cobrado", "Valor Glosa", "Valor Recursado", "Quantidade", "Mês", "Nota Fiscal"]:
+        if c in df.columns:
+            df[c] = _to_num(df[c])
+
+    # 3) Flags de glosa (mesma lógica do seu app)
+    if "Valor Glosa" in df.columns:
+        df["_is_glosa"] = df["Valor Glosa"] < 0
+        df["_valor_glosa_abs"] = df["Valor Glosa"].abs().fillna(0)
     else:
         df["_is_glosa"] = False
         df["_valor_glosa_abs"] = 0.0
 
+    # 4) AMHPTISS: dígitos normalizados (feito 1x só aqui)
+    if "Amhptiss" in df.columns:
+        df["Amhptiss"] = df["Amhptiss"].astype(str).str.strip()
+        df["_amhp_digits"] = df["Amhptiss"].str.replace(r"[^\\d]", "", regex=True).str.strip()
+    else:
+        df["_amhp_digits"] = ""
+
+    # 5) Categorias para filtros (economia de RAM e filtros mais rápidos)
+    for c in ["Convênio", "Prestador", "Nome Clínica", "Cobrança", "Tipo de Glosa", "Descrição"]:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
+
+    # ----------------- Mapeamento de colunas (colmap) -----------------
+    # Mantém os nomes esperados pelo restante da aba
+    def _pick_col(df, *candidates):
+        for cand in candidates:
+            for col in df.columns:
+                if str(col).strip().lower() == str(cand).strip().lower():
+                    return col
+                lc = str(col).lower()
+                if isinstance(cand, str) and all(w in lc for w in cand.lower().split()):
+                    return col
+        return None
+
+    colmap = {
+        "valor_cobrado": _pick_col(df, "Valor Cobrado"),
+        "valor_glosa": _pick_col(df, "Valor Glosa"),
+        "valor_recursado": _pick_col(df, "Valor Recursado"),
+        "data_pagamento": _pick_col(df, "Pagamento"),
+        "data_realizado": _pick_col(df, "Realizado"),
+        "motivo": _pick_col(df, "Motivo Glosa"),
+        "desc_motivo": _pick_col(df, "Descricao Glosa", "Descrição Glosa"),
+        "tipo_glosa": _pick_col(df, "Tipo de Glosa"),
+        "descricao": _pick_col(df, "Descrição", "Descrição do Item"),
+        "procedimento": _pick_col(df, "Procedimento", "TUSS", "Item", "Código"),
+        "convenio": _pick_col(df, "Convênio", "Convenio"),
+        "prestador": _pick_col(df, "Prestador", "Nome Clínica", "Nome Clinica"),
+        "amhptiss": _pick_col(df, "Amhptiss", "AMHPTISS", "Número AMHPTISS", "Nº AMHPTISS"),
+        "cobranca": _pick_col(df, "Cobrança", "Cobranca"),
+    }
+
+    # Garante colunas auxiliares (iguais ao app atual)
+    if "_pagto_dt" not in df.columns:   df["_pagto_dt"] = pd.NaT
+    if "_pagto_ym" not in df.columns:   df["_pagto_ym"] = pd.NaT
+    if "_pagto_mes_br" not in df.columns: df["_pagto_mes_br"] = ""
+
     return df, colmap
+
 
 def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     """
