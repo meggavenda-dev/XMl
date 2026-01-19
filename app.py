@@ -1292,7 +1292,15 @@ with tab_glosas:
         else:
             mot = analytics["top_motivos"].head(20) 
 
-
+        
+            # --- 🔧 Normalizar coluna AMHPTISS para string sem vírgulas ---
+            if amhp_col in result.columns:
+                result[amhp_col] = (
+                    result[amhp_col]
+                    .astype(str)
+                    .str.replace(r"[^\d]", "", regex=True)
+                )
+         
             # 🔧 Normalizar motivo SEM vírgulas (forçar string)
             if "Motivo" in mot.columns:
                 mot["Motivo"] = (
