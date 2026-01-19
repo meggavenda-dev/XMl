@@ -1569,49 +1569,7 @@ with tab_glosas:
                 agg_fmt["Detalhes"] = prev_series
         
                 st.caption("Clique em **Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
-                editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
-        
-                edited = st.data_editor(
-                    agg_fmt,
-                    use_container_width=True,
-                    height=420,
-                    disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
-                    column_config={
-                        "Detalhes": st.column_config.CheckboxColumn(
-                            help="Mostrar detalhes deste item logo abaixo",
-                            default=False
-                        )
-                    },
-                    key=editor_key
-                )
-        
-                if "Descrição do Item" not in edited.columns:
-                    new_selected_item = None
-                else:
-                    curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
-                    turned_on  = (curr_series & ~prev_series)
-                    if turned_on.any():
-                        idx = turned_on[turned_on].index[-1]
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-                    elif not curr_series.any():
-                        new_selected_item = None
-                    elif curr_series.sum() == 1:
-                        idx = curr_series.idxmax()
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-                    else:
-                        candidates = curr_series[curr_series].index.tolist()
-                        prev_idx = prev_series[prev_series].index.tolist()
-                        pick = [i for i in candidates if i not in prev_idx]
-                        idx = (pick[-1] if pick else candidates[-1])
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-        
-                if new_selected_item != selected_item_name:
-                    st.session_state[sel_state_key] = new_selected_item
-                    st.session_state[ver_key] += 1
-                    st.rerun()
-        
-                selected_item_name = st.session_state[sel_state_key]
-
+                
             # ============ BUSCA POR Nº AMHPTISS ============
             amhp_col = colmap.get("amhptiss")
             if amhp_col and amhp_col in df_g.columns:
