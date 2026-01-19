@@ -1603,13 +1603,13 @@ with tab_glosas:
                         n_glos = int((result["Glosado?"] == "Sim").sum()) if "Glosado?" in result.columns else 0
                         n_nao  = total_linhas - n_glos
             
-                        st.write(
-                            f"**Registros:** {total_linhas} "
-                            f"• **Glosados:** {n_glos} "
-                            f"• **Não glosados:** {n_nao} "
-                            f"• **Total Cobrado:** {f_currency(total_cobrado)} "
-                            f"• **Total Glosado:** {f_currency(total_glosado)}"
-                        )
+                        #st.write(
+                        #    f"**Registros:** {total_linhas} "
+                        #    f"• **Glosados:** {n_glos} "
+                        #    f"• **Não glosados:** {n_nao} "
+                        #    f"• **Total Cobrado:** {f_currency(total_cobrado)} "
+                        #    f"• **Total Glosado:** {f_currency(total_glosado)}"
+                        #)
             
                         # Mini-resumo por status de Cobrança (se houver)
                         if colmap.get("cobranca") and colmap["cobranca"] in result.columns:
