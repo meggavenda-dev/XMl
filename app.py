@@ -1624,14 +1624,25 @@ with tab_glosas:
                     (df_view["_is_glosa"] == True)
                 ].copy()
 
-                    if amhp_col2 and amhp_col2 in df_item.columns:
-                        df_item[amhp_col2] = (
-                            df_item[amhp_col2]
-                            .astype(str)
-                            .str.replace(r"[^\d]", "", regex=True)
-                            .str.strip()
-                        )
-                               
+
+                # Agora sim: detectar a coluna AMHPTISS primeiro
+                amhp_col2 = colmap.get("amhptiss")
+                if not amhp_col2:
+                    # tentar localizar equivalentes
+                    for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
+                        if cand in df_item.columns:
+                            amhp_col2 = cand
+                            break
+                
+                # Normalização FINAL dentro dos detalhes
+                if amhp_col2 and amhp_col2 in df_item.columns:
+                    df_item[amhp_col2] = (
+                        df_item[amhp_col2]
+                        .astype(str)
+                        .str.replace(r"[^\d]", "", regex=True)
+                        .str.strip()
+                    )
+ 
         
                 if df_item.empty:
                     st.info(
