@@ -1374,7 +1374,8 @@ with tab_glosas:
                         if not ignorar_filtros:
                             st.caption("Dica: se algum item da guia não aparecer, marque **“Ignorar filtros de Convênio/Mês”** acima.")
 
-        # Série mensal (Pagamento) — SEM gráficos
+       
+         # Série mensal (Pagamento) — SEM gráficos
         st.markdown("### 📅 Glosa por **mês de pagamento**")
         has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
         if has_pagto:
@@ -1401,8 +1402,20 @@ with tab_glosas:
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # ---------- Top motivos / Tipos (SEM gráficos) ----------
+        # ==========================================
+        # 🔽 NOVO: trazemos a seção de Convênios para logo abaixo da série mensal
+        # ==========================================
         analytics = build_glosas_analytics(df_view, colmap)
+
+        st.markdown("### 🏥 Convênios com maior valor glosado")
+        by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
+        if by_conv.empty:
+            st.info("Coluna de 'Convênio' não encontrada.")
+        else:
+            by_conv_top = by_conv.head(20)
+            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+
+        # ---------- Top motivos / Tipos (SEM gráficos) ----------
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
@@ -1413,9 +1426,10 @@ with tab_glosas:
         #st.markdown("### 🧷 Tipo de glosa")
         #by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
         #if by_tipo.empty:
-            #st.info("Coluna de 'Tipo de Glosa' não encontrada.")
+        #    st.info("Coluna de 'Tipo de Glosa' não encontrada.")
         #else:
-            #st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+        #    st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------          
                
@@ -1622,15 +1636,6 @@ with tab_glosas:
                         )
 
 
-
-        # Convênios (SEM gráficos)
-        st.markdown("### 🏥 Convênios com maior valor glosado")
-        by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
-        if by_conv.empty:
-            st.info("Coluna de 'Convênio' não encontrada.")
-        else:
-            by_conv_top = by_conv.head(20)
-            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
 
         # Export análise XLSX (glosas)
         st.markdown("---")
