@@ -1505,21 +1505,12 @@ with tab_glosas:
             
                 
                 # Exibição dos resultados (se houver no estado)
+
                 if st.session_state.amhp_result_df is not None:
                     result = st.session_state.amhp_result_df.copy()
-                    numero_alvo = st.session_state.amhp_result_num               
-                   
-                   
-                    # 🔧 Normalizar Nº AMHPTISS (opcional, só para exibição)
-                    if amhp_col in result.columns:
-                        result[amhp_col] = (
-                            result[amhp_col]
-                            .astype(str)
-                            .str.replace(r"[^\d]", "", regex=True)
-                            .str.strip()
-                        )
-                    
-                    # 🔧 Normalizar "Motivo Glosa" (evitar 2,012 etc.)
+                    numero_alvo = st.session_state.amhp_result_num
+                
+                    # --- Normalização do motivo ---
                     motivo_col = colmap.get("motivo")
                     if motivo_col and motivo_col in result.columns:
                         result[motivo_col] = (
@@ -1528,10 +1519,38 @@ with tab_glosas:
                             .str.replace(r"[^\d]", "", regex=True)
                             .str.strip()
                         )
-            
+                
                     st.markdown("---")
-                    st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
-            
+                    st.subheader(f"🧾 Itens da guia — AMHPTISS {numero_alvo}")
+                
+                    # ================================
+                    # 📌 NOVO RESUMO DA GUIA
+                    # ================================
+                    # Quantidade total de itens cobrados
+                    qtd_cobrados = len(result)
+                
+                    # Quantidade de itens glosados
+                    qtd_glosados = int((result.get("Glosado?") == "Sim").sum()) if "Glosado?" in result.columns else 0
+                
+                    # Total Cobrado (já renomeado)
+                    total_cobrado = float(
+                        pd.to_numeric(result.get("Valor Cobrado (R$)"), errors="coerce").fillna(0).sum()
+                    ) if "Valor Cobrado (R$)" in result.columns else 0.0
+                
+                    # Total Glosado (usa o valor ABSOLUTO)
+                    total_glosado = float(
+                        pd.to_numeric(result.get("Valor Glosado (R$)"), errors="coerce").abs().fillna(0).sum()
+                    ) if "Valor Glosado (R$)" in result.columns else 0.0
+                
+                    # Exibição — um item por linha
+                    st.markdown("### 📌 Resumo da guia")
+                    st.write(f"**Total Cobrado:** {f_currency(total_cobrado)}")
+                    st.write(f"**Total Glosado:** {f_currency(total_glosado)}")
+                    st.write(f"**Quantidade de itens cobrados:** {qtd_cobrados}")
+                    st.write(f"**Quantidade de itens glosados:** {qtd_glosados}")
+                    st.markdown("---")
+                
+                    # Depois daqui segue seu código normal:
                     if result.empty:
                         msg_filtros = " com os filtros atuais" if not ignorar_filtros else ""
                         st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg_filtros}.")
