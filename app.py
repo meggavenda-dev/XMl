@@ -1804,9 +1804,6 @@ with tab_glosas:
                         mime="text/csv",
                     )
 
-        
-                    # Linha separadora entre Detalhes e Busca por AMHPTISS
-                    st.markdown("---")
 
         # Export análise XLSX (glosas)
         st.markdown("---")
