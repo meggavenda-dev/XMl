@@ -1673,6 +1673,14 @@ with tab_glosas:
         # === DETALHES DO ITEM SELECIONADO (recolocado após a busca AMHPTISS) ===
         if selected_item_name:
             st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
+
+            
+            # Botão para fechar os detalhes
+            if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
+                st.session_state[sel_state_key] = None      # zera item selecionado
+                st.session_state[ver_key] += 1             # força reset do data_editor
+                st.rerun()
+
         
             # Filtra apenas guias glosadas daquele item no recorte atual
             desc_col_map = colmap.get("descricao")
