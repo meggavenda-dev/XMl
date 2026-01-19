@@ -1331,31 +1331,64 @@ with tab_glosas:
         # ==========================================
         analytics = build_glosas_analytics(df_view, colmap)
 
+        
         st.markdown("### 🏥 Convênios com maior valor glosado")
+        
         by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
         if by_conv.empty:
             st.info("Coluna de 'Convênio' não encontrada.")
         else:
-            by_conv_top = by_conv.head(20)
-            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-
-        st.markdown("### 🥇 Top motivos de glosa (por valor)")
-        if not analytics or analytics["top_motivos"].empty:
-            st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
-        else:
-            mot = analytics["top_motivos"].head(20).copy()
-            if "Motivo" in mot.columns:
-                mot["Motivo"] = (
-                    mot["Motivo"]
-                    .astype(str)
-                    .str.replace(r"[^\d]", "", regex=True)
-                    .str.strip()
+            # 1) Base de Valor Cobrado por convênio (no recorte atual: df_view)
+            if colmap.get("convenio") in df_view.columns and colmap.get("valor_cobrado") in df_view.columns:
+                cob_df = (
+                    df_view.groupby(colmap["convenio"], as_index=False)
+                           .agg(Valor_Cobrado=(colmap["valor_cobrado"], "sum"))
+                           .rename(columns={colmap["convenio"]: "Convênio"})
                 )
-            st.dataframe(
-                apply_currency(mot, ["Valor Glosado (R$)"]),
-                use_container_width=True,
-                height=360
+            else:
+                cob_df = pd.DataFrame(columns=["Convênio", "Valor_Cobrado"])
+        
+            # 2) Unificar com o ranking de glosa vindo do analytics
+            conv_df = by_conv.copy()
+        
+            # Nome da coluna de glosa (pode ser "Valor Glosado (R$)" ou "Valor_Glosado")
+            glosa_col = "Valor Glosado (R$)" if "Valor Glosado (R$)" in conv_df.columns else (
+                "Valor_Glosado" if "Valor_Glosado" in conv_df.columns else None
             )
+        
+            # Renomear para o padrão pedido pelo Guilherme
+            ren_map = {}
+            if glosa_col:
+                ren_map[glosa_col] = "Valor Glosado"
+            conv_df = conv_df.rename(columns=ren_map)
+        
+            # 3) Trazer Valor Cobrado e manter apenas as 4 colunas desejadas
+            conv_df = conv_df.merge(cob_df, on="Convênio", how="left")
+            # Se quisermos nome sem “(R$)”, usar "Valor Cobrado" mesmo:
+            conv_df = conv_df.rename(columns={"Valor_Cobrado": "Valor Cobrado"})
+        
+            # 4) Selecionar e ordenar colunas
+            cols_final = ["Convênio", "Qtd", "Valor Cobrado", "Valor Glosado"]
+            for c in cols_final:
+                if c not in conv_df.columns:
+                    conv_df[c] = 0
+            conv_df = conv_df[cols_final].copy()
+        
+            # 5) Formatar moeda nas duas colunas financeiras
+            conv_df_fmt = apply_currency(conv_df, ["Valor Cobrado", "Valor Glosado"])
+        
+            # 6) Mostrar TOP 20 (por Valor Glosado desc, depois Qtd)
+            conv_df_fmt = (
+                conv_df_fmt
+                .assign(_ord_glosa = conv_df["Valor Glosado"].astype(float),
+                        _ord_qtd   = conv_df["Qtd"].astype(int))
+                .sort_values(["_ord_glosa", "_ord_qtd"], ascending=[False, False])
+                .drop(columns=["_ord_glosa", "_ord_qtd"])
+                .head(20)
+            )
+        
+            st.dataframe(conv_df_fmt, use_container_width=True, height=320)
+
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
