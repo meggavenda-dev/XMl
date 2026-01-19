@@ -1290,7 +1290,15 @@ with tab_glosas:
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
         else:
-            mot = analytics["top_motivos"].head(20)
+            mot = analytics["top_motivos"].head(20)        
+            # 🔧 Normalizar motivo SEM vírgulas (forçar string)
+            if "Motivo" in mot.columns:
+                mot["Motivo"] = (
+                    mot["Motivo"]
+                    .astype(str)
+                    .str.replace(r"[^\d]", "", regex=True)
+                    .str.strip()
+                )
             st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
 
         #st.markdown("### 🧷 Tipo de glosa")
