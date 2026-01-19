@@ -775,6 +775,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     cols = df.columns
 
     # ---------- Mapeamento inicial ----------
+    
     colmap = {
         "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
         "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
@@ -785,6 +786,24 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
         "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
         "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
+        # 👇 NOVO: mapeia Procedimento (código). Tenta vários rótulos comuns.
+                # Código / Procedimento / TUSS / Item
+        "procedimento": _pick_col(
+            df,
+            "procedimento",
+            "código",
+            "codigo",
+            "cód procedimento",
+            "cod procedimento",
+            "cod. procedimento",
+            "procedimento tuss",
+            "tuss",
+            "cod tuss",
+            "codigo tuss",
+            "item",
+            "codigo item",
+            "código item"
+        ),
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
         "amhptiss": next((
@@ -795,6 +814,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         ), None),
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
+
 
     # ---------- "Realizado" robusto (sem "Horário") ----------
     norm_cols = [(c, re.sub(r"\s+", " ", str(c)).strip().lower()) for c in cols]
@@ -1391,87 +1411,121 @@ with tab_glosas:
 
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
+        
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
-        top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
-        if top_itens.empty:
+        
+        # Bases e colunas
+        desc_col = colmap.get("descricao")
+        proc_col = colmap.get("procedimento")
+        vc_col   = colmap.get("valor_cobrado")
+        vg_col   = colmap.get("valor_glosa")
+        
+        base_glosa = df_view[df_view["_is_glosa"] == True].copy() if "_is_glosa" in df_view.columns else pd.DataFrame()
+        
+        if (not desc_col) or (desc_col not in df_view.columns):
             st.info("Coluna de 'Descrição' não encontrada.")
         else:
-            df_items = top_itens.copy()
-            if "Descrição do Item" not in df_items.columns:
-                desc_col = colmap.get("descricao")
-                if desc_col and desc_col in df_items.columns:
-                    df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
-            if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
-                df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
-
-            if "Qtd" not in df_items.columns:
-                if colmap and "_is_glosa" in df_view.columns and colmap.get("descricao") in df_view.columns:
-                    qtd_series = (
-                        df_view[df_view["_is_glosa"] == True]
-                        .groupby(colmap["descricao"])["_is_glosa"]
-                        .size()
-                    )
-                    df_items["Qtd"] = df_items["Descrição do Item"].map(qtd_series).fillna(0).astype(int)
-                else:
-                    df_items["Qtd"] = 0
-
-            df_items_top = df_items.head(20).copy()
-            df_items_show = apply_currency(df_items_top.copy(), ["Valor Glosado (R$)"])
-
-            sel_state_key = "top_itens_editor_selected"
-            ver_key       = "top_itens_editor_version"
-            if ver_key not in st.session_state:
-                st.session_state[ver_key] = 0
-            if sel_state_key not in st.session_state:
-                st.session_state[sel_state_key] = None
-
-            selected_item_name = st.session_state[sel_state_key]
-            prev_series = (df_items_show.get("Descrição do Item", "").astype(str) == str(selected_item_name))
-            df_items_show["🔍 Detalhes"] = prev_series
-
-            st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
-            editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
-
-            edited = st.data_editor(
-                df_items_show,
-                use_container_width=True,
-                height=420,
-                disabled=[c for c in df_items_show.columns if c != "🔍 Detalhes"],
-                column_config={
-                    "🔍 Detalhes": st.column_config.CheckboxColumn(
-                        help="Mostrar detalhes deste item logo abaixo",
-                        default=False
-                    )
-                },
-                key=editor_key
-            )
-
-            if "Descrição do Item" not in edited.columns:
-                new_selected_item = None
+            if base_glosa.empty:
+                st.info("Sem itens glosados no recorte atual.")
             else:
-                curr_series = edited["🔍 Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
-                turned_on  = (curr_series & ~prev_series)
-                if turned_on.any():
-                    idx = turned_on[turned_on].index[-1]
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
-                elif not curr_series.any():
-                    new_selected_item = None
-                elif curr_series.sum() == 1:
-                    idx = curr_series.idxmax()
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                # 1) Agregar por (Código + Descrição) quando possível, senão só por Descrição
+                group_keys = [desc_col]
+                if proc_col and (proc_col in df_view.columns):
+                    group_keys = [proc_col, desc_col]
+        
+                agg = (
+                    base_glosa.groupby(group_keys, dropna=False, as_index=False)
+                              .agg(
+                                  Qtd=("_is_glosa", "size"),
+                                  Valor_cobrado=(vc_col, "sum") if (vc_col and vc_col in base_glosa.columns) else ("_valor_glosa_abs", "size"),
+                                  Valor_glosado=("_valor_glosa_abs", "sum")
+                              )
+                )
+        
+                # 2) Renomear colunas pedidas
+                ren_map = {desc_col: "Descrição do Item", "Valor_cobrado": "Valor cobrado", "Valor_glosado": "Valor glosado"}
+                if proc_col and (proc_col in agg.columns):
+                    ren_map[proc_col] = "Código"
+                agg = agg.rename(columns=ren_map)
+        
+                # 3) Ordenar por Valor glosado (desc) e Qtd
+                agg = agg.sort_values(["Valor glosado", "Qtd"], ascending=[False, False]).reset_index(drop=True)
+        
+                # 4) Manter somente as 6 colunas
+                cols_final = ["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]
+                
+                # Garantir que Código seja string (evita vírgulas, formatação numérica e arredondamentos)
+                if "Código" not in agg.columns:
+                    agg["Código"] = ""
                 else:
-                    candidates = curr_series[curr_series].index.tolist()
-                    prev_idx = prev_series[prev_series].index.tolist()
-                    pick = [i for i in candidates if i not in prev_idx]
-                    idx = (pick[-1] if pick else candidates[-1])
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                    agg["Código"] = agg["Código"].astype(str).str.replace(r"[^\dA-Za-z]+", "", regex=True).str.strip()
+                
+                # Reorganizar colunas
+                agg = agg[["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]]
 
-            if new_selected_item != selected_item_name:
-                st.session_state[sel_state_key] = new_selected_item
-                st.session_state[ver_key] += 1
-                st.rerun()
+        
+                # 5) Formatar moedas
+                agg_fmt = apply_currency(agg.copy(), ["Valor cobrado", "Valor glosado"])
+        
+                # 6) Adicionar coluna 'Detalhes' (checkbox) — seleção continua por Descrição do Item
+                sel_state_key = "top_itens_editor_selected"
+                ver_key       = "top_itens_editor_version"
+                if ver_key not in st.session_state:
+                    st.session_state[ver_key] = 0
+                if sel_state_key not in st.session_state:
+                    st.session_state[sel_state_key] = None
+        
+                selected_item_name = st.session_state[sel_state_key]
+        
+                # série booleana com a linha selecionada (por Descrição)
+                prev_series = (agg_fmt.get("Descrição do Item", "").astype(str) == str(selected_item_name))
+                agg_fmt["Detalhes"] = prev_series
+        
+                st.caption("Clique em **Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
+                editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
+        
+                edited = st.data_editor(
+                    agg_fmt,
+                    use_container_width=True,
+                    height=420,
+                    disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
+                    column_config={
+                        "Detalhes": st.column_config.CheckboxColumn(
+                            help="Mostrar detalhes deste item logo abaixo",
+                            default=False
+                        )
+                    },
+                    key=editor_key
+                )
+        
+                # Detectar troca de seleção
+                if "Descrição do Item" not in edited.columns:
+                    new_selected_item = None
+                else:
+                    curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
+                    turned_on  = (curr_series & ~prev_series)
+                    if turned_on.any():
+                        idx = turned_on[turned_on].index[-1]
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+                    elif not curr_series.any():
+                        new_selected_item = None
+                    elif curr_series.sum() == 1:
+                        idx = curr_series.idxmax()
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+                    else:
+                        candidates = curr_series[curr_series].index.tolist()
+                        prev_idx = prev_series[prev_series].index.tolist()
+                        pick = [i for i in candidates if i not in prev_idx]
+                        idx = (pick[-1] if pick else candidates[-1])
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+        
+                if new_selected_item != selected_item_name:
+                    st.session_state[sel_state_key] = new_selected_item
+                    st.session_state[ver_key] += 1
+                    st.rerun()
+        
+                selected_item_name = st.session_state[sel_state_key]
 
-            selected_item_name = st.session_state[sel_state_key]
 
             # ============ BUSCA POR Nº AMHPTISS ============
             amhp_col = colmap.get("amhptiss")
@@ -1813,3 +1867,4 @@ with tab_glosas:
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
+
