@@ -1408,6 +1408,47 @@ with tab_glosas:
             )
         
             st.dataframe(conv_df_fmt, use_container_width=True, height=320)
+            
+            # ================================
+            # Top 20 — Motivos de glosa por maior valor glosado
+            # (um ÚNICO quadro: visíveis ~5 linhas, demais via rolagem)
+            # ================================
+            st.markdown("### 🧾 Top 20 — Motivos de glosa por **maior valor glosado**")
+            
+            mot_df = analytics["top_motivos"] if analytics else pd.DataFrame()
+            if mot_df.empty:
+                st.info("Não foi possível montar o ranking de motivos (verifique as colunas de 'Motivo Glosa' e 'Descrição Glosa' nos arquivos).")
+            else:
+                # Detecta a coluna de valor glosado
+                gl_col = "Valor Glosado (R$)" if "Valor Glosado (R$)" in mot_df.columns else (
+                    "Valor_Glosado" if "Valor_Glosado" in mot_df.columns else None
+                )
+                if gl_col is None:
+                    st.info("Coluna de valor glosado não encontrada no ranking de motivos.")
+                else:
+                    mot_view = mot_df.copy()
+                    if gl_col != "Valor Glosado (R$)":
+                        mot_view = mot_view.rename(columns={gl_col: "Valor Glosado (R$)"})
+            
+                    # Ordenar por Valor Glosado desc e, se existir, por Qtd desc
+                    if "Qtd" in mot_view.columns:
+                        mot_view = mot_view.sort_values(["Valor Glosado (R$)", "Qtd"], ascending=[False, False])
+                    else:
+                        mot_view = mot_view.sort_values(["Valor Glosado (R$)"], ascending=[False])
+            
+                    # Limitar ao TOP 20
+                    mot_view = mot_view.head(20)
+            
+                    # Exibir SOMENTE as 3 colunas solicitadas (código, descrição, valor total glosado)
+                    cols_show = [c for c in ["Motivo", "Descrição do Motivo", "Valor Glosado (R$)"] if c in mot_view.columns]
+                    mot_view_fmt = apply_currency(mot_view[cols_show], ["Valor Glosado (R$)"])
+            
+                    # Um ÚNICO quadro com barra de rolagem (altura ~5 linhas)
+                    st.dataframe(
+                        mot_view_fmt,
+                        use_container_width=True,
+                        height=260   # ajuste fino, ~5 linhas visíveis; a partir da 6ª rola
+                    )
 
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
