@@ -1418,8 +1418,7 @@ with tab_glosas:
             #st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------          
-        
-        
+               
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
@@ -1454,7 +1453,7 @@ with tab_glosas:
             df_items_show = apply_currency(df_items_top.copy(), ["Valor Glosado (R$)"])
         
             # -------------------------------
-            # Seleção ÚNICA de "Detalhes"
+            # Seleção ÚNICA de "Detalhes" com detecção de mudança (diff)
             # -------------------------------
             sel_state_key = "top_itens_editor_selected"     # string com o nome selecionado (ou None)
             ver_key       = "top_itens_editor_version"      # inteiro para forçar reset do data_editor
@@ -1466,10 +1465,11 @@ with tab_glosas:
         
             selected_item_name = st.session_state[sel_state_key]
         
-            # Pré-marca apenas o item que está no estado
-            df_items_show["🔍 Detalhes"] = (
+            # Série "anterior" (antes do editor): apenas o item no estado fica True
+            prev_series = (
                 df_items_show.get("Descrição do Item", "").astype(str) == str(selected_item_name)
             )
+            df_items_show["🔍 Detalhes"] = prev_series
         
             st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
             editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
@@ -1488,22 +1488,47 @@ with tab_glosas:
                 key=editor_key
             )
         
-            # Descobre o que ficou marcado NO RESULTADO EDITADO
+            # -------------------------------
+            # Decide a nova seleção por DIFF (quem virou True agora)
+            # -------------------------------
             if "Descrição do Item" not in edited.columns:
                 st.warning("Coluna 'Descrição do Item' não está presente na tabela exibida.")
                 new_selected_item = None
             else:
-                sel_rows = edited[edited["🔍 Detalhes"] == True]
-                if sel_rows.empty:
+                # Série "depois" (pós-edição) alinhada ao índice original
+                curr_series = edited["🔍 Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
+        
+                turned_on  = (curr_series & ~prev_series)      # False -> True
+                turned_off = (~curr_series & prev_series)      # True  -> False
+        
+                if turned_on.any():
+                    # Se marcou outro checkbox (independe de ser acima ou abaixo),
+                    # escolha o (ou o último) que acabou de virar True
+                    idx = turned_on[turned_on].index[-1]
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+        
+                elif not curr_series.any():
+                    # Todos desmarcados
                     new_selected_item = None
+        
+                elif curr_series.sum() == 1:
+                    # Ficou apenas 1 True (mantém ele)
+                    idx = curr_series.idxmax()
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+        
                 else:
-                    # Se houver mais de um marcado (situação transitória), forçamos a escolha do último
-                    new_selected_item = sel_rows["Descrição do Item"].iloc[-1]
+                    # Raro: sobrou mais de 1 True sem "turned_on" detectado (p.ex. seleção restaurada pelo widget)
+                    # Preferimos o que é diferente do anterior; se não houver, pega o último.
+                    candidates = curr_series[curr_series].index.tolist()
+                    prev_idx = prev_series[prev_series].index.tolist()
+                    pick = [i for i in candidates if i not in prev_idx]
+                    idx = (pick[-1] if pick else candidates[-1])
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
         
             # Se a seleção mudou, atualiza o estado e RESETA o editor (muda o key → limpa checkboxes antigos)
             if new_selected_item != selected_item_name:
                 st.session_state[sel_state_key] = new_selected_item
-                st.session_state[ver_key] += 1      # muda a chave do data_editor
+                st.session_state[ver_key] += 1
                 st.rerun()
         
             # Usa a seleção vigente do estado
@@ -1595,6 +1620,7 @@ with tab_glosas:
                             file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', selected_item_name)[:40]}.csv",
                             mime="text/csv",
                         )
+
 
 
         # Convênios (SEM gráficos)
