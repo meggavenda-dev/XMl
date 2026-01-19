@@ -1766,8 +1766,13 @@ with tab_glosas:
                 st.rerun()
         
         # Se há item selecionado e foi clicado "Fechar detalhes", marcamos para pular o editor
+       
         if st.session_state.get("close_details_clicked", False):
-            must_close = True
+            st.session_state["close_details_clicked"] = False
+            st.session_state[sel_state_key] = None
+            st.session_state[ver_key] += 1
+            st.rerun()
+
         
         # ============================================================
         # TRATAMENTO DO FECHAMENTO — faz o rerun ANTES de desenhar detalhes
