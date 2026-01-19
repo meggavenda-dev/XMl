@@ -1468,10 +1468,20 @@ with tab_glosas:
                         st.session_state.amhp_result_df = result
                         st.session_state.amhp_result_num = numero_alvo
             
+                
                 # Exibição dos resultados (se houver no estado)
                 if st.session_state.amhp_result_df is not None:
                     result = st.session_state.amhp_result_df.copy()
                     numero_alvo = st.session_state.amhp_result_num
+                
+                    # --- 🔧 Normalizar coluna AMHPTISS para string sem vírgulas ---
+                    if amhp_col in result.columns:
+                        result[amhp_col] = (
+                            result[amhp_col]
+                            .astype(str)
+                            .str.replace(r"[^\d]", "", regex=True)   # remove vírgula, ponto etc.
+                        )
+
             
                     st.markdown("---")
                     st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
