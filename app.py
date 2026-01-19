@@ -1283,18 +1283,46 @@ with tab_glosas:
             base_m = df_view[df_view["_is_glosa"] == True].copy()
             if base_m.empty:
                 st.info("Sem glosas no recorte atual.")
-            else:
-                mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                  .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                       Valor_Cobrado=(colmap["valor_cobrado"], "sum"))
-                         ).sort_values("_pagto_ym")
-                st.dataframe(
-                    apply_currency(mensal.rename(columns={
-                        "Valor_Glosado":"Valor Glosado (R$)",
-                        "Valor_Cobrado":"Valor Cobrado (R$)"
-                    }), ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
-                    use_container_width=True, height=260
+            else:                
+                # ========================
+                # 📅 Glosa por mês de pagamento — versão personalizada
+                # ========================
+                mensal = (
+                    base_m.groupby(["_pagto_ym", "_pagto_mes_br"], as_index=False)
+                          .agg(
+                              Valor_Glosado=("_valor_glosa_abs", "sum"),
+                              Valor_Cobrado=(colmap["valor_cobrado"], "sum"),
+                              Valor_Recursado=(colmap["valor_recursado"], "sum") if colmap.get("valor_recursado") in base_m.columns else ("_valor_glosa_abs", "size")
+                          )
+                          .sort_values("_pagto_ym")
                 )
+                
+                # 1) Renomear colunas
+                mensal = mensal.rename(columns={
+                    "_pagto_mes_br": "Mês de Pagamento",
+                    "Valor_Glosado": "Valor Glosado (R$)",
+                    "Valor_Cobrado": "Valor Cobrado (R$)",
+                    "Valor_Recursado": "Valor Recursado (R$)",
+                })
+                
+                # 2) Selecionar somente as 4 colunas desejadas
+                cols_final = [
+                    "Mês de Pagamento",
+                    "Valor Cobrado (R$)",
+                    "Valor Glosado (R$)",
+                    "Valor Recursado (R$)"
+                ]
+                mensal = mensal[cols_final]
+                
+                # 3) Formatar moeda
+                mensal_fmt = apply_currency(
+                    mensal,
+                    ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]
+                )
+                
+                # 4) Exibir
+                st.dataframe(mensal_fmt, use_container_width=True, height=260)
+
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
