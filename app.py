@@ -75,11 +75,13 @@ def parse_date_flex(s: str) -> Optional[datetime]:
             continue
     return None
 
-def normalize_code(s: str, strip_zeros: bool = False) -> str:
-    if s is None:
-        return ""
-    s2 = re.sub(r'[\.\-_/ \t]', '', str(s)).strip()
-    return s2.lstrip('0') if strip_zeros else s2
+def normalize_code(series: pd.Series, strip_zeros: bool = False) -> pd.Series:
+    """Versão vetorizada da normalização de códigos."""
+    # Remove caracteres especiais de toda a coluna de uma vez
+    s = series.astype(str).str.replace(r'[\.\-_/ \t]', '', regex=True)
+    if strip_zeros:
+        return s.str.lstrip('0')
+    return s
 
 def _normtxt(s: str) -> str:
     s = str(s or "")
@@ -504,34 +506,21 @@ def build_demo_df(demo_files, strip_zeros_codes=False) -> pd.DataFrame:
 def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     linhas: List[Dict] = []
     for f in xml_files:
-        if hasattr(f, 'seek'):
-            f.seek(0)
-        try:
-            if hasattr(f, 'read'):
-                bts = f.read()
-                linhas.extend(_cached_xml_bytes(bts))
-            else:
-                linhas.extend(parse_itens_tiss_xml(f))
-        except Exception as e:
-            linhas.append({'arquivo': getattr(f, 'name', 'upload.xml'), 'erro': str(e)})
+        if hasattr(f, 'seek'): f.seek(0)
+        # O cache aqui é vital, mas o processamento interno foi simplificado
+        linhas.extend(_cached_xml_bytes(f.read() if hasattr(f, 'read') else f))
+    
+    if not linhas: return pd.DataFrame()
+    
     df = pd.DataFrame(linhas)
-    if df.empty:
-        return df
-
-    for c in ['quantidade', 'valor_unitario', 'valor_total']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
-    df['codigo_procedimento_norm'] = df['codigo_procedimento'].astype(str).map(
-        lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
-    )
-    df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
-                        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
-
-    df['chave_oper'] = (
-        df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
-        + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
-    )
-
+    
+    # Processamento Vetorizado (Muito mais rápido que .map ou .apply)
+    df['codigo_procedimento_norm'] = normalize_code_fast(df['codigo_procedimento'], strip_zeros_codes)
+    
+    # Criação de chaves sem loops
+    df['chave_prest'] = df['numeroGuiaPrestador'].astype(str) + "__" + df['codigo_procedimento_norm']
+    df['chave_oper'] = df['numeroGuiaOperadora'].astype(str) + "__" + df['codigo_procedimento_norm']
+    
     return df
 
 _XML_CORE_COLS = [
