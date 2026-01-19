@@ -787,13 +787,23 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
         "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
         # 👇 NOVO: mapeia Procedimento (código). Tenta vários rótulos comuns.
-        "procedimento": next((
-            c for c in cols
-            if re.sub(r"\s+", " ", str(c)).strip().lower() in {
-                "procedimento", "código", "codigo", "cód. procedimento", "cod. procedimento",
-                "cod procedimento", "código procedimento", "codigo procedimento", "tuss"
-            } or ("proced" in str(c).lower()) or ("tuss" in str(c).lower())
-        ), None),
+                # Código / Procedimento / TUSS / Item
+        "procedimento": _pick_col(
+            df,
+            "procedimento",
+            "código",
+            "codigo",
+            "cód procedimento",
+            "cod procedimento",
+            "cod. procedimento",
+            "procedimento tuss",
+            "tuss",
+            "cod tuss",
+            "codigo tuss",
+            "item",
+            "codigo item",
+            "código item"
+        ),
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
         "amhptiss": next((
