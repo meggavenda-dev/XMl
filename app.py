@@ -1700,18 +1700,43 @@ with tab_glosas:
                     ]
                     show_cols = [c for c in possiveis if c and c in df_item.columns]
         
-                    # Totais do detalhamento
-                    total_reg = len(df_item)
-                    total_cobrado_item = 0.0
-                    if colmap.get("valor_cobrado") in df_item.columns:
-                        total_cobrado_item = pd.to_numeric(df_item[colmap["valor_cobrado"]], errors="coerce").fillna(0).sum()
-                    total_glosa_item = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-        
-                    st.write(
-                        f"**Registros (glosados):** {total_reg}  •  "
-                        f"**Cobrado (lista):** {f_currency(total_cobrado_item)}  •  "
-                        f"**Glosa (lista):** {f_currency(total_glosa_item)}"
+                    
+                    # ============================
+                    # 🔢 NOVO RESUMO DO ITEM
+                    # ============================
+                    
+                    # Todas as linhas do item (incluindo glosadas e não glosadas)
+                    df_item_all = df_view[df_view[desc_col_map].astype(str) == str(selected_item_name)]
+                    
+                    qtd_itens_cobrados = len(df_item_all)
+                    
+                    valor_total_cobrado = 0.0
+                    if colmap.get("valor_cobrado") in df_item_all.columns:
+                        valor_total_cobrado = pd.to_numeric(
+                            df_item_all[colmap["valor_cobrado"]], errors="coerce"
+                        ).fillna(0).sum()
+                    
+                    # Contagem de guias distintas
+                    if colmap.get("convenio") and colmap.get("prestador"):
+                        qtd_guias = len(df_item_all)
+                    else:
+                        qtd_guias = len(df_item_all)
+                    
+                    # Total glosado (somente linhas glosadas)
+                    valor_total_glosado = (
+                        df_item["_valor_glosa_abs"].sum()
+                        if "_valor_glosa_abs" in df_item.columns
+                        else 0.0
                     )
+                    
+                    # ✨ Exibir resumo (um item por linha)
+                    st.markdown("### 📌 Resumo do item")
+                    st.write(f"**Itens cobrados:** {qtd_itens_cobrados}")
+                    st.write(f"**Total cobrado:** {f_currency(valor_total_cobrado)}")
+                    st.write(f"**Guias (todas):** {qtd_guias}")
+                    st.write(f"**Total glosado:** {f_currency(valor_total_glosado)}")
+                    st.markdown("---")
+
         
                     # Formatação de moeda no detalhamento
                     money_cols_fmt = []
