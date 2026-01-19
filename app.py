@@ -1492,26 +1492,34 @@ with tab_glosas:
                     st.session_state.amhp_result = None
                     st.stop()
 
+                
                 if clique_buscar:
                     num = digits(numero_input)
                     if not num:
                         st.warning("Digite um Nº AMHPTISS válido.")
                     else:
                         st.session_state.amhp_query = num
-                        base = df_g if ignorar_filtros else df_view                        
+                        base = df_g if ignorar_filtros else df_view
+                
                         if num in amhp_index:
                             idx = amhp_index[num]
-                        
-                            # Corrige erro: só mantém os índices que existem no DF filtrado
+                
+                            # ✅ mantém só os índices existentes no DF base (evita KeyError)
+                            #    Obs.: a ordem é preservada como no índice da guia (idx)
                             idx_validos = [i for i in idx if i in base.index]
-                        
-                            if len(idx_validos) > 0:
+                
+                            if idx_validos:
                                 result = base.loc[idx_validos]
                             else:
-                                # A guia existe, mas não aparece com os filtros atuais
+                                # A guia existe no dataset completo, mas saiu com os filtros atuais
                                 result = pd.DataFrame()
                         else:
+                            # Nº AMHPTISS inexistente no dataset
                             result = pd.DataFrame()
+                
+                        # ✅ SALVA o resultado no estado para ser lido abaixo
+                        st.session_state.amhp_result = result
+
 
 
                 result = st.session_state.amhp_result
