@@ -1,6 +1,8 @@
 
+# -*- coding: utf-8 -*-
 # =========================================================
 # app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX)
+# (Versão: Detalhes só com glosa + Busca AMHPTISS + SEM gráficos na aba Faturas Glosadas)
 # =========================================================
 from __future__ import annotations
 
@@ -8,28 +10,23 @@ import io
 import os
 import re
 import json
+import time
+import shutil
+import xml.etree.ElementTree as ET
+import unicodedata
 from pathlib import Path
 from typing import List, Dict, Optional, Union, IO, Tuple
 from decimal import Decimal
 from datetime import datetime
-import xml.etree.ElementTree as ET
-import unicodedata
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 
-# # (Opcional) Limpar cache após atualização de código (execute 1x e comente):
-# try: st.cache_data.clear()
-# except: pass
-
 # =========================================================
 # Configuração da página (UI)
 # =========================================================
-st.set_page_config(
-    page_title="TISS • Conciliação & Analytics (Auditoria desativada)",
-    layout="wide"
-)
+st.set_page_config(page_title="TISS • Conciliação & Analytics", layout="wide")
 st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Analytics")
 st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado (AMHP), gera rankings e analytics — sem editor de XML. Auditoria mantida no código, porém desativada.")
 
@@ -95,7 +92,6 @@ MAP_FILE = "demo_mappings.json"
 
 def categorizar_motivo_ans(codigo: str) -> str:
     codigo = str(codigo).strip()
-    # Mapeamento simplificado (exemplos)
     if codigo in ['1001','1002','1003','1006','1009']: return "Cadastro/Elegibilidade"
     if codigo in ['1201','1202','1205','1209']: return "Autorização/SADT"
     if codigo in ['1801','1802','1805','1806']: return "Tabela/Preços"
@@ -119,7 +115,6 @@ def save_demo_mappings(mappings: dict):
     except Exception as e:
         st.error(f"Erro ao salvar mapeamentos: {e}")
 
-# Carrega mapeamentos persistidos na inicialização
 if "demo_mappings" not in st.session_state:
     st.session_state["demo_mappings"] = load_demo_mappings()
 
@@ -130,7 +125,6 @@ def _cached_read_excel(file, sheet_name=0) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def _cached_xml_bytes(b: bytes) -> List[Dict]:
-    # Apenas para cachear parsing; será chamado com bytes do upload
     from io import BytesIO
     return parse_itens_tiss_xml(BytesIO(b))
 
@@ -292,13 +286,11 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
-    # 1) tenta Excel; se falhar, tenta CSV
     try:
         df_raw = pd.read_excel(path, header=None, engine="openpyxl")
     except:
         df_raw = pd.read_csv(path, header=None)
 
-    # 2) Localiza linha de cabeçalho (onde aparece CPF/CNPJ)
     header_row = None
     for i in range(min(20, len(df_raw))):
         row_values = df_raw.iloc[i].astype(str).tolist()
@@ -308,12 +300,10 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     if header_row is None:
         raise ValueError("Não foi possível localizar a linha de cabeçalho 'CPF/CNPJ' no demonstrativo.")
 
-    # 3) Lê a partir do cabeçalho correto
     df = df_raw.iloc[header_row + 1:].copy()
     df.columns = df_raw.iloc[header_row]
     df = df.loc[:, df.columns.notna()]
 
-    # 4) Renomeia
     ren = {
         "Guia": "numeroGuiaPrestador",
         "Cod. Procedimento": "codigo_procedimento",
@@ -326,30 +316,22 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     }
     df = df.rename(columns=ren)
 
-    # 5) Limpezas
     df["numeroGuiaPrestador"] = (
         df["numeroGuiaPrestador"]
-        .astype(str)
-        .str.replace(".0", "", regex=False)
-        .str.strip()
-        .str.lstrip("0")
+        .astype(str).str.replace(".0", "", regex=False).str.strip().str.lstrip("0")
     )
     df["codigo_procedimento"] = df["codigo_procedimento"].astype(str).str.strip()
 
-    # 6) Normaliza código (TUSS/SIMPRO)
     df["codigo_procedimento_norm"] = df["codigo_procedimento"].map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
 
-    # 7) Números
     for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
 
-    # 8) Chaves
     df["chave_demo"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
 
-    # 9) Motivo de glosa (código/descrição)
     if "codigo_glosa_bruto" in df.columns:
         df["motivo_glosa_codigo"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^(\d+)")
         df["motivo_glosa_descricao"] = df["codigo_glosa_bruto"].astype(str).str.extract(r"^\d+\s*-\s*(.*)")
@@ -363,7 +345,7 @@ _COLMAPS = {
     "lote": [r"\blote\b"],
     "competencia": [r"compet|m[eê]s|refer"],
     "guia_prest": [r"\bguia\b"],
-    "guia_oper": [r"\bguia\b"],
+    "guia_oper": [r"^\bguia\b"],
     "cod_proc": [r"cod.*proced|proced.*cod|tuss"],
     "desc_proc": [r"descr"],
     "qtd_apres": [r"quant|qtd"],
@@ -541,7 +523,7 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     )
     df['chave_prest'] = (df['numeroGuiaPrestador'].fillna('').astype(str).str.strip()
                         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip())
-    
+
     df['chave_oper'] = (
         df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
@@ -549,7 +531,6 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
 
     return df
 
-# helper para padronizar nomes do "lado XML" após merges com sufixos
 _XML_CORE_COLS = [
     'arquivo', 'numero_lote', 'tipo_guia',
     'numeroGuiaPrestador', 'numeroGuiaOperadora',
@@ -579,12 +560,10 @@ def conciliar_itens(
     fallback_por_descricao: bool = False,
 ) -> Dict[str, pd.DataFrame]:
 
-    # 1ª: chave do prestador
     m1 = df_xml.merge(df_demo, left_on="chave_prest", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # 2ª: chave da operadora
     restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
     cols_xml = df_xml.columns.tolist()
@@ -594,7 +573,6 @@ def conciliar_itens(
 
     conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
-    # 3ª opcional: descrição + valor (tolerância)
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
         ainda_sem_match = m2[m2["matched_on"] == ""].copy()
@@ -616,7 +594,6 @@ def conciliar_itens(
                     fallback_matches["matched_on"] = "descricao+valor"
                     conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
-    # unmatch final
     if not fallback_matches.empty:
         chaves_resolvidas = fallback_matches["chave_prest"].unique()
         unmatch = m2[(m2["matched_on"] == "") & (~m2["chave_prest"].isin(chaves_resolvidas))].copy()
@@ -628,7 +605,6 @@ def conciliar_itens(
         if subset_cols:
             unmatch = unmatch.drop_duplicates(subset=subset_cols)
 
-    # cálculos
     if not conc.empty:
         conc = _alias_xml_cols(conc)
         conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
@@ -640,13 +616,12 @@ def conciliar_itens(
     return {"conciliacao": conc, "nao_casados": unmatch}
 
 # -----------------------------
-# Analytics (derivados do conciliado)
+# Analytics
 # -----------------------------
 def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     base = df_conc.copy()
     if base.empty:
         return base
-    
     if 'competencia' not in base.columns and 'Competência' in base.columns:
         base['competencia'] = base['Competência'].astype(str)
     elif 'competencia' not in base.columns:
@@ -754,11 +729,10 @@ def auditar_guias(df_xml_itens: pd.DataFrame, prazo_retorno: int = 30) -> pd.Dat
     agg["numero_lote(s)"] = agg["numero_lote"].apply(lambda L: ", ".join(L))
     agg.drop(columns=["arquivo","numero_lote"], inplace=True)
     agg["chave_guia"] = agg.apply(lambda r: build_chave_guia(r["tipo_guia"], r["numeroGuiaPrestador"], r["numeroGuiaOperadora"]), axis=1)
-    # função mantida para uso futuro; não é chamada na interface/export
     return agg
 
 # =========================================================
-# PARTE 5.1 — Helpers da aba "Faturas Glosadas (XLSX)" (única definição)
+# PARTE 5.1 — Helpers da aba "Faturas Glosadas (XLSX)"
 # =========================================================
 def _pick_col(df: pd.DataFrame, *candidates):
     """Retorna o primeiro nome de coluna que existir no DF dentre os candidatos."""
@@ -794,10 +768,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
         "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
         "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
-
-        # Data de Pagamento
         "data_pagamento": next((c for c in cols if "Pagamento" in str(c)), None),
-
         "data_realizado": next((c for c in cols if "Realizado" in str(c)), None),
         "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
         "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
@@ -805,8 +776,6 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "descricao": _pick_col(df, "descrição", "descricao", "descrição do item", "descricao do item"),
         "convenio": next((c for c in cols if "Convênio" in str(c) or "Convenio" in str(c)), None),
         "prestador": next((c for c in cols if "Nome Clínica" in str(c) or "Nome Clinica" in str(c) or "Prestador" in str(c)), None),
-
-        # >>> AMHPTISS (detecta inclusive a grafia exata 'Amhptiss')
         "amhptiss": next((
             c for c in cols
             if str(c).strip().lower() in {
@@ -824,7 +793,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     if colmap["data_realizado"] and colmap["data_realizado"] in df.columns:
         df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
 
-    # Pagamento (sempre cria colunas derivadas)
+    # Pagamento (sempre cria derivadas)
     if colmap["data_pagamento"] and colmap["data_pagamento"] in df.columns:
         df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce")
     else:
@@ -856,7 +825,6 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     cm = colmap
     m = df["_is_glosa"].fillna(False)
 
-    # KPIs (pós-filtro)
     total_linhas = len(df)
     periodo_ini = df[cm["data_realizado"]].min() if cm["data_realizado"] in df.columns else None
     periodo_fim = df[cm["data_realizado"]].max() if cm["data_realizado"] in df.columns else None
@@ -866,7 +834,6 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     convenios = int(df[cm["convenio"]].nunique()) if cm["convenio"] in df.columns else 0
     prestadores = int(df[cm["prestador"]].nunique()) if cm["prestador"] in df.columns else 0
 
-    # Agrupamentos (apenas glosadas)
     base = df.loc[m].copy()
 
     def _agg(df_, keys):
@@ -875,15 +842,13 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
         out = (df_.groupby(keys, dropna=False, as_index=False)
                .agg(Qtd=('_is_glosa', 'size'),
                     Valor_Glosado=('_valor_glosa_abs', 'sum')))
-        out = out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
-        return out
+        return out.sort_values(["Valor_Glosado","Qtd"], ascending=False)
 
-    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm["motivo"] and cm["desc_motivo"] else pd.DataFrame()
-    by_tipo     = _agg(base, [cm["tipo_glosa"]]) if cm["tipo_glosa"] else pd.DataFrame()
-    top_itens   = _agg(base, [cm["descricao"]]) if cm["descricao"] else pd.DataFrame()
-    by_convenio = _agg(base, [cm["convenio"]]) if cm["convenio"] else pd.DataFrame()
+    top_motivos = _agg(base, [cm["motivo"], cm["desc_motivo"]]) if cm.get("motivo") and cm.get("desc_motivo") else pd.DataFrame()
+    by_tipo     = _agg(base, [cm["tipo_glosa"]]) if cm.get("tipo_glosa") else pd.DataFrame()
+    top_itens   = _agg(base, [cm["descricao"]]) if cm.get("descricao") else pd.DataFrame()
+    by_convenio = _agg(base, [cm["convenio"]]) if cm.get("convenio") else pd.DataFrame()
 
-    # Labels bonitos
     if not top_motivos.empty:
         top_motivos = top_motivos.rename(columns={
             cm["motivo"]: "Motivo",
@@ -893,9 +858,9 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
     if not by_tipo.empty:
         by_tipo = by_tipo.rename(columns={cm["tipo_glosa"]: "Tipo de Glosa", "Valor_Glosado":"Valor Glosado (R$)"})
     if not top_itens.empty:
-        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor_Glosado":"Valor Glosado (R$)"})
+        top_itens = top_itens.rename(columns={cm["descricao"]:"Descrição do Item", "Valor Glosado":"Valor Glosado (R$)"})
     if not by_convenio.empty:
-        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor_Glosado":"Valor Glosado (R$)"})
+        by_convenio = by_convenio.rename(columns={cm["convenio"]:"Convênio", "Valor Glosado":"Valor Glosado (R$)"})
 
     return dict(
         kpis=dict(
@@ -927,14 +892,14 @@ with st.sidebar:
 tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
 # =========================================================
-# ABA 1 — Conciliação TISS
+# ABA 1 — Conciliação TISS (mantida com gráficos)
 # =========================================================
 with tab_conc:
     st.subheader("📤 Upload de arquivos")
     xml_files = st.file_uploader("XML TISS (um ou mais):", type=['xml'], accept_multiple_files=True, key="xml_up")
     demo_files = st.file_uploader("Demonstrativos de Pagamento (.xlsx) — itemizado:", type=['xlsx'], accept_multiple_files=True, key="demo_up")
 
-    # PROCESSAMENTO DO DEMONSTRATIVO (SEMPRE) — para permitir wizard
+    # PROCESSAMENTO DO DEMONSTRATIVO (sempre) — permite wizard
     df_demo = build_demo_df(demo_files or [], strip_zeros_codes=strip_zeros_codes)
     if not df_demo.empty:
         st.info("Demonstrativo carregado e mapeado. A conciliação considerará **somente** os itens presentes nos XMLs. Itens presentes apenas no demonstrativo serão **ignorados**.")
@@ -944,7 +909,6 @@ with tab_conc:
 
     st.markdown("---")
     if st.button("🚀 Processar Conciliação & Analytics", type="primary", key="btn_conc"):
-        # 1) XML
         df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
         if df_xml.empty:
             st.warning("Nenhum item extraído do(s) XML(s). Verifique os arquivos.")
@@ -957,7 +921,6 @@ with tab_conc:
             st.warning("Nenhum demonstrativo válido para conciliar.")
             st.stop()
 
-        # 2) Conciliação
         result = conciliar_itens(
             df_xml=df_xml,
             df_demo=df_demo,
@@ -984,11 +947,10 @@ with tab_conc:
             st.download_button("Baixar Não Conciliados (CSV)", data=unmatch.to_csv(index=False).encode("utf-8"),
                                file_name="nao_conciliados.csv", mime="text/csv")
 
-        # 3) Analytics — apenas conciliado
+        # Analytics (conciliado)
         st.markdown("---")
         st.subheader("📊 Analytics de Glosa (apenas itens conciliados)")
 
-        # 3.1 Competência
         st.markdown("### 📈 Tendência por competência")
         kpi_comp = kpis_por_competencia(conc)
         st.dataframe(apply_currency(kpi_comp, ['valor_apresentado','valor_pago','valor_glosa']), use_container_width=True)
@@ -997,7 +959,6 @@ with tab_conc:
         except Exception:
             pass
 
-        # 3.2 Top Itens
         st.markdown("### 🏆 TOP itens glosados (valor e %)")
         min_apres = st.number_input("Corte mínimo de Apresentado para ranking por % (R$)", min_value=0.0, value=500.0, step=50.0, key="min_apres_pct")
         top_valor, top_pct = ranking_itens_glosa(conc, min_apresentado=min_apres, topn=20)
@@ -1009,7 +970,6 @@ with tab_conc:
             st.markdown("**Por % de glosa (TOP 20)**")
             st.dataframe(apply_currency(top_pct, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-        # 3.3 Motivos
         st.markdown("### 🧩 Motivos de glosa — análise")
         comp_opts = ['(todas)']
         if 'competencia' in conc.columns:
@@ -1018,7 +978,6 @@ with tab_conc:
         motdf = motivos_glosa(conc, None if comp_sel=='(todas)' else comp_sel)
         st.dataframe(apply_currency(motdf, ['valor_glosa','valor_apresentado']), use_container_width=True)
 
-        # 3.4 Médicos
         st.markdown("### 👩‍⚕️ Médicos — ranking por glosa")
         if 'competencia' in conc.columns:
             comp_med = st.selectbox("Competência (médicos)",
@@ -1036,7 +995,6 @@ with tab_conc:
         st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]),
                                     ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
-        # 3.5 Por Tabela (se existir)
         st.markdown("### 🧾 Glosa por Tabela (22/19)")
         if 'Tabela' in conc.columns:
             tab = (conc.groupby('Tabela', as_index=False)
@@ -1048,14 +1006,12 @@ with tab_conc:
         else:
             st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
 
-        # 3.6 Qualidade da Conciliação
         if 'matched_on' in conc.columns:
             st.markdown("### 🧪 Qualidade da conciliação (origem do match)")
             match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
             st.bar_chart(match_dist.set_index('origem'))
             st.dataframe(match_dist, use_container_width=True)
 
-        # 3.7 Outliers
         st.markdown("### 🚩 Outliers em valor apresentado (por procedimento)")
         out_df = outliers_por_procedimento(conc, k=1.5)
         if out_df.empty:
@@ -1065,7 +1021,6 @@ with tab_conc:
             st.download_button("Baixar Outliers (CSV)", data=out_df.to_csv(index=False).encode("utf-8"),
                                file_name="outliers_valor_apresentado.csv", mime="text/csv")
 
-        # 3.8 Simulador
         st.markdown("### 🧮 Simulador de faturamento (what‑if por motivo de glosa)")
         motivos_disponiveis = sorted(conc['motivo_glosa_codigo'].dropna().astype(str).unique().tolist()) if 'motivo_glosa_codigo' in conc.columns else []
         if motivos_disponiveis:
@@ -1087,10 +1042,8 @@ with tab_conc:
                 pago_sim=('valor_pago_sim','sum')
             ))
             st.json({k: f_currency(v) for k, v in res.to_dict().items()})
-        else:
-            st.info("Sem motivos de glosa identificados para simulação.")
 
-        # Exportação
+        # Export Excel consolidado
         st.markdown("---")
         st.subheader("📥 Exportar Excel Consolidado")
 
@@ -1142,28 +1095,6 @@ with tab_conc:
 
             kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
 
-            top_valor.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Valor')
-            top_pct.to_excel(wr, index=False, sheet_name='Top_Itens_Glosa_Pct')
-
-            if 'matched_on' in conc.columns:
-                match_dist = conc['matched_on'].value_counts(dropna=False).rename_axis('origem').reset_index(name='itens')
-                match_dist.to_excel(wr, index=False, sheet_name='Qualidade_Conciliacao')
-
-            if not out_df.empty:
-                out_df.to_excel(wr, index=False, sheet_name='Outliers')
-
-            # Ajustes visuais
-            for name in wr.sheets:
-                ws = wr.sheets[name]
-                ws.freeze_panes = "A2"
-                for col in ws.columns:
-                    try:
-                        col_letter = col[0].column_letter
-                    except Exception:
-                        continue
-                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
-
         st.download_button(
             "⬇️ Baixar Excel consolidado",
             data=buf.getvalue(),
@@ -1172,21 +1103,17 @@ with tab_conc:
         )
 
 # =========================================================
-# ABA 2 — Faturas Glosadas (XLSX) — com session_state
-# (Sem “Visão geral”, “Situação de recurso” e “Analista”)
-# + Itens interativos com modal/expander (compatibilidade)
+# ABA 2 — Faturas Glosadas (XLSX) (SEM gráficos)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
     st.caption("A análise respeita filtros por **Convênio** e por **mês de Pagamento**. O processamento é persistido com session_state.")
 
-    # ---------- Estado inicial ----------
     if "glosas_ready" not in st.session_state:
         st.session_state.glosas_ready = False
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
-        st.session_state.glosas_item_modal = None  # item selecionado para detalhe
 
     glosas_files = st.file_uploader(
         "Relatórios de Faturas Glosadas (.xlsx):",
@@ -1211,7 +1138,6 @@ with tab_glosas:
         st.session_state.glosas_data = None
         st.session_state.glosas_colmap = None
         st.session_state.glosas_files_sig = None
-        st.session_state.glosas_item_modal = None
         st.rerun()
 
     if proc_click:
@@ -1224,7 +1150,6 @@ with tab_glosas:
             st.session_state.glosas_colmap = colmap
             st.session_state.glosas_ready = True
             st.session_state.glosas_files_sig = files_sig
-            st.session_state.glosas_item_modal = None
             st.rerun()
 
     if st.session_state.glosas_ready and st.session_state.glosas_data is not None:
@@ -1235,7 +1160,7 @@ with tab_glosas:
         df_g   = st.session_state.glosas_data
         colmap = st.session_state.glosas_colmap
 
-        # Diagnóstico (opcional)
+        # Diagnóstico
         with st.expander("🔧 Diagnóstico (debug rápido)", expanded=False):
             st.write("**Colunas do DataFrame:**", list(df_g.columns))
             st.write("**Mapeamento detectado (colmap):**")
@@ -1281,8 +1206,142 @@ with tab_glosas:
         if has_pagto and mes_sel_label:
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
-        # Série mensal (Pagamento)
+        # ==========================================
+        # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com colunas explícitas)
+        # ==========================================
+        st.markdown("### 🔎 Buscar por **Nº AMHPTISS** (tudo que foi cobrado)")
+        amhp_col = colmap.get("amhptiss")
+        if not amhp_col or amhp_col not in df_g.columns:
+            st.info(
+                "Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados. "
+                "Verifique se há uma coluna como *AMHPTISS*, *AMHP TISS*, *Nº AMHPTISS*, etc."
+            )
+        else:
+            c1, c2 = st.columns([0.55, 0.45])
+            with c1:
+                amhptiss_busca = st.text_input(
+                    "Informe o Nº AMHPTISS",
+                    value="",
+                    placeholder="Ex.: 61916098",
+                    key="amhptiss_lookup",
+                )
+            with c2:
+                ignorar_filtros = st.checkbox(
+                    "Ignorar filtros de Convênio/Mês",
+                    value=False,
+                    help="Busca no dataset inteiro (não apenas no recorte atual)."
+                )
+
+            # Botão de busca
+            buscar_click = st.button("🔎 Buscar", key="btn_busca_amhptiss_tudo")
+
+            def _digits(s: str) -> str:
+                return re.sub(r"\D+", "", str(s or ""))
+
+            if buscar_click:
+                numero_alvo = _digits(amhptiss_busca)
+                if not numero_alvo:
+                    st.warning("Informe um número AMHPTISS válido (somente dígitos).")
+                else:
+                    # Fonte da busca: df_g (todos os dados) ou df_view (recorte atual)?
+                    df_base_busca = df_g if ignorar_filtros else df_view
+                    df_tmp = df_base_busca.copy()
+                    df_tmp["_amhp_digits"] = df_tmp[amhp_col].astype(str).map(_digits)
+
+                    # Resultado da guia (SEM filtrar por glosa → traz tudo que foi cobrado)
+                    result = df_tmp[df_tmp["_amhp_digits"] == numero_alvo].copy()
+
+                    st.markdown("---")
+                    st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
+
+                    if result.empty:
+                        msg_filtros = " com os filtros atuais" if not ignorar_filtros else ""
+                        st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg_filtros}.")
+                    else:
+                        # Coluna “Glosado?” e padronização dos nomes de colunas de valor
+                        if "_is_glosa" in result.columns:
+                            result["Glosado?"] = result["_is_glosa"].map({True: "Sim", False: "Não"})
+                        else:
+                            result["Glosado?"] = "—"
+
+                        col_valor_cobrado  = colmap.get("valor_cobrado")
+                        col_valor_glosa    = colmap.get("valor_glosa")
+                        col_valor_recursa  = colmap.get("valor_recursado")
+
+                        # Renomeia para exposição clara
+                        ren = {}
+                        if col_valor_cobrado and col_valor_cobrado in result.columns:
+                            ren[col_valor_cobrado] = "Valor Cobrado (R$)"
+                        if col_valor_glosa and col_valor_glosa in result.columns:
+                            ren[col_valor_glosa]   = "Valor Glosado (R$)"
+                        if col_valor_recursa and col_valor_recursa in result.columns:
+                            ren[col_valor_recursa] = "Valor Recursado (R$)"
+                        result = result.rename(columns=ren)
+
+                        # Totais
+                        total_linhas = len(result)
+                        total_cobrado = float(
+                            pd.to_numeric(result.get("Valor Cobrado (R$)"), errors="coerce").fillna(0).sum()
+                        ) if "Valor Cobrado (R$)" in result.columns else 0.0
+                        total_glosado = float(
+                            pd.to_numeric(result.get("Valor Glosado (R$)"), errors="coerce").fillna(0).sum()
+                        ) if "Valor Glosado (R$)" in result.columns else 0.0
+
+                        n_glos = int((result["Glosado?"] == "Sim").sum()) if "Glosado?" in result.columns else 0
+                        n_nao  = total_linhas - n_glos
+
+                        st.write(
+                            f"**Registros:** {total_linhas} "
+                            f"• **Glosados:** {n_glos} "
+                            f"• **Não glosados:** {n_nao} "
+                            f"• **Total Cobrado:** {f_currency(total_cobrado)} "
+                            f"• **Total Glosado:** {f_currency(total_glosado)}"
+                        )
+
+                        # Colunas a exibir (sempre trazendo Cobrado/Glosado se existirem)
+                        possiveis = [
+                            amhp_col,
+                            colmap.get("convenio"),
+                            colmap.get("prestador"),
+                            colmap.get("descricao"),
+                            colmap.get("motivo"),
+                            colmap.get("desc_motivo"),
+                            colmap.get("tipo_glosa"),
+                            colmap.get("data_realizado"),
+                            colmap.get("data_pagamento"),
+                            "Valor Cobrado (R$)",
+                            "Valor Glosado (R$)",
+                            "Valor Recursado (R$)",
+                            "Glosado?",
+                        ]
+                        show_cols = [c for c in possiveis if c and c in result.columns]
+                        if not show_cols:
+                            show_cols = result.columns.tolist()
+
+                        # Formatação de moeda
+                        money_cols = [c for c in ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"] if c in show_cols]
+
+                        st.dataframe(
+                            apply_currency(result[show_cols], money_cols),
+                            use_container_width=True,
+                            height=420
+                        )
+
+                        # Export
+                        st.download_button(
+                            "⬇️ Baixar resultado (CSV)",
+                            data=result[show_cols].to_csv(index=False).encode("utf-8"),
+                            file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
+                            mime="text/csv",
+                        )
+
+                        # Dica sobre filtros de mês/convênio
+                        if not ignorar_filtros:
+                            st.caption("Dica: se algum item da guia não aparecer, marque **“Ignorar filtros de Convênio/Mês”** acima.")
+
+        # Série mensal (Pagamento) — SEM gráficos
         st.markdown("### 📅 Glosa por **mês de pagamento**")
+        has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
         if has_pagto:
             base_m = df_view[df_view["_is_glosa"] == True].copy()
             if base_m.empty:
@@ -1304,17 +1363,10 @@ with tab_glosas:
                     }), ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
                     use_container_width=True, height=260
                 )
-                try:
-                    st.bar_chart(
-                        mensal.set_index("_pagto_mes_br")[["Valor_Glosado"]]
-                              .rename(columns={"Valor_Glosado":"Valor Glosado (R$)"})
-                    )
-                except Exception:
-                    pass
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # ---------- Top motivos ----------
+        # ---------- Top motivos / Tipos (SEM gráficos) ----------
         analytics = build_glosas_analytics(df_view, colmap)
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
@@ -1322,13 +1374,7 @@ with tab_glosas:
         else:
             mot = analytics["top_motivos"].head(20)
             st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-            try:
-                chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
-            except Exception:
-                pass
 
-        # ---------- Tipo de glosa ----------
         st.markdown("### 🧷 Tipo de glosa")
         by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
         if by_tipo.empty:
@@ -1336,143 +1382,110 @@ with tab_glosas:
         else:
             st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
-        # ---------- Itens/descrições com maior valor glosado — INTERATIVO ----------
+        # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
         if top_itens.empty:
             st.info("Coluna de 'Descrição' não encontrada.")
         else:
-            # Padroniza nome da coluna de descrição para exibir
             df_items = top_itens.copy()
             if "Descrição do Item" not in df_items.columns:
                 desc_col = colmap.get("descricao")
                 if desc_col and desc_col in df_items.columns:
                     df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
+            if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
+                df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
 
-            # Exibe o TOP-N (ranking)
             df_items_top = df_items.head(20).copy()
             st.dataframe(
                 apply_currency(df_items_top, ["Valor Glosado (R$)"]),
                 use_container_width=True,
                 height=360
             )
-            st.caption("Clique em **🔎 Ver guias** ao lado do item desejado para abrir a relação detalhada.")
+            st.caption("Abra o **🔎 Detalhes** abaixo de cada item para ver a relação completa (somente guias glosadas).")
 
-            # Ações por linha (botões)
-            for i, row in df_items_top.reset_index(drop=True).iterrows():
-                col_desc, col_val, col_btn = st.columns([0.65, 0.20, 0.15])
-                with col_desc:
-                    st.write(f"**{row.get('Descrição do Item', '')}**")
-                with col_val:
-                    try:
-                        st.write(f_currency(row.get("Valor Glosado (R$)", 0)))
-                    except Exception:
-                        st.write("-")
-                with col_btn:
-                    if st.button("🔎 Ver guias", key=f"ver_guias_{i}"):
-                        st.session_state["glosas_item_modal"] = str(row.get("Descrição do Item", ""))
-                        st.rerun()
+            desc_col_map = colmap.get("descricao")
+            if not desc_col_map or desc_col_map not in df_view.columns:
+                st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
+            else:
+                for i, row in df_items_top.reset_index(drop=True).iterrows():
+                    item_nome = row.get("Descrição do Item", "")
+                    with st.expander(f"🔎 Detalhes — {item_nome}"):
+                        # Apenas guias glosadas daquele item
+                        df_item = df_view[
+                            (df_view[desc_col_map].astype(str) == str(item_nome)) &
+                            (df_view["_is_glosa"] == True)
+                        ].copy()
 
-            # ---------- Detalhe por Item (compatível com versões sem st.modal) ----------
-            def _render_item_detail(df_view: pd.DataFrame, colmap: dict, item_escolhido: str):
-                """Renderiza o detalhe do item selecionado priorizando AMHPTISS."""
-                dcol = colmap.get("descricao")
-                if not dcol or dcol not in df_view.columns:
-                    st.warning("Não foi possível localizar a coluna de descrição no dataset.")
-                    if st.button("Fechar", key="close_item_modal_err"):
-                        st.session_state["glosas_item_modal"] = None
-                        st.rerun()
-                    return
+                        if df_item.empty:
+                            st.info(
+                                "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
+                                "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
+                            )
+                            continue
 
-                # Recorte do item
-                df_item = df_view[df_view[dcol].astype(str) == str(item_escolhido)].copy()
-                if df_item.empty:
-                    st.info("Nenhuma linha encontrada para este item no recorte atual.")
-                    if st.button("Fechar", key="close_item_modal_empty"):
-                        st.session_state["glosas_item_modal"] = None
-                        st.rerun()
-                    return
+                        # Colunas relevantes
+                        amhp_col2 = colmap.get("amhptiss")
+                        if not amhp_col2:
+                            for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
+                                if cand in df_item.columns:
+                                    amhp_col2 = cand
+                                    break
 
-                # AMHPTISS (mapeado em colmap; inclui fallback para grafias)
-                amhp_col = colmap.get("amhptiss")
-                if not amhp_col:
-                    for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
-                        if cand in df_item.columns:
-                            amhp_col = cand
-                            break
+                        possiveis = [
+                            amhp_col2,
+                            colmap.get("convenio"),
+                            colmap.get("prestador"),
+                            colmap.get("data_pagamento"),
+                            colmap.get("data_realizado"),
+                            colmap.get("motivo"),
+                            colmap.get("desc_motivo"),
+                            colmap.get("valor_cobrado"),
+                            colmap.get("valor_glosa"),
+                            colmap.get("valor_recursado"),
+                        ]
+                        show_cols = [c for c in possiveis if c and c in df_item.columns]
 
-                # Colunas úteis (AMHPTISS primeiro)
-                possiveis = [
-                    amhp_col,
-                    colmap.get("convenio"),
-                    colmap.get("prestador"),
-                    colmap.get("data_pagamento"),
-                    colmap.get("data_realizado"),
-                    colmap.get("motivo"),
-                    colmap.get("desc_motivo"),
-                    colmap.get("valor_cobrado"),
-                    colmap.get("valor_glosa"),
-                    colmap.get("valor_recursado"),
-                ]
-                show_cols = [c for c in possiveis if c and c in df_item.columns]
+                        total_reg = len(df_item)
+                        total_cobrado_item = 0.0
+                        if colmap.get("valor_cobrado") in df_item.columns:
+                            total_cobrado_item = pd.to_numeric(df_item[colmap["valor_cobrado"]], errors="coerce").fillna(0).sum()
+                        total_glosa_item = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
+                        st.write(
+                            f"**Registros (glosados):** {total_reg}  •  "
+                            f"**Cobrado (lista):** {f_currency(total_cobrado_item)}  •  "
+                            f"**Glosa (lista):** {f_currency(total_glosa_item)}"
+                        )
 
-                # Ordenação amigável: AMHPTISS -> Data de Pagamento
-                if amhp_col and amhp_col in df_item.columns:
-                    if colmap.get("data_pagamento") in df_item.columns:
-                        df_item = df_item.sort_values([amhp_col, colmap["data_pagamento"]], ascending=[True, True])
-                    else:
-                        df_item = df_item.sort_values([amhp_col], ascending=[True])
-                elif colmap.get("data_pagamento") in df_item.columns:
-                    df_item = df_item.sort_values([colmap["data_pagamento"]], ascending=[True])
+                        money_cols_fmt = []
+                        if colmap.get("valor_cobrado") and (colmap["valor_cobrado"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_cobrado"])
+                        if colmap.get("valor_glosa") and (colmap["valor_glosa"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_glosa"])
+                        if colmap.get("valor_recursado") and (colmap["valor_recursado"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_recursado"])
 
-                # Cabeçalho/resumo
-                total_reg = len(df_item)
-                total_glosa = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-                st.write(f"**Registros:** {total_reg}  •  **Glosa total:** {f_currency(total_glosa)}")
+                        if "_valor_glosa_abs" in df_item.columns:
+                            df_item = df_item.sort_values("_valor_glosa_abs", ascending=False)
 
-                # Exibição
-                if show_cols:
-                    st.dataframe(
-                        apply_currency(
-                            df_item[show_cols],
-                            [
-                                colmap.get("valor_cobrado") or "",
-                                colmap.get("valor_glosa") or "",
-                                colmap.get("valor_recursado") or "",
-                            ],
-                        ),
-                        use_container_width=True,
-                        height=420,
-                    )
-                else:
-                    st.dataframe(df_item, use_container_width=True, height=420)
+                        if show_cols:
+                            st.dataframe(
+                                apply_currency(df_item[show_cols], money_cols_fmt),
+                                use_container_width=True,
+                                height=420,
+                            )
+                        else:
+                            st.dataframe(df_item, use_container_width=True, height=420)
 
-                # Download do recorte (com AMHPTISS se houver)
-                base_cols = show_cols if show_cols else df_item.columns.tolist()
-                st.download_button(
-                    "⬇️ Baixar relação (CSV)",
-                    data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
-                    file_name=f"guias_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_escolhido)[:40]}_AMHPTISS.csv",
-                    mime="text/csv",
-                )
+                        base_cols = show_cols if show_cols else df_item.columns.tolist()
+                        st.download_button(
+                            "⬇️ Baixar relação (CSV) — apenas guias com glosa",
+                            data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                            file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_nome)[:40]}.csv",
+                            mime="text/csv",
+                        )
 
-                if st.button("Fechar", key="close_item_modal_ok"):
-                    st.session_state["glosas_item_modal"] = None
-                    st.rerun()
-
-            # Abre modal se disponível; senão, usa expander
-            item_escolhido = st.session_state.get("glosas_item_modal")
-            if item_escolhido:
-                _title = f"Guias/linhas que contêm o item: {item_escolhido}"
-                if hasattr(st, "modal"):
-                    with st.modal(_title):
-                        _render_item_detail(df_view, colmap, item_escolhido)
-                else:
-                    with st.expander(_title, expanded=True):
-                        st.info("Sua versão do Streamlit não possui `st.modal`. Exibindo em um painel expansível.")
-                        _render_item_detail(df_view, colmap, item_escolhido)
-
-        # ---------- Convênios com maior valor glosado ----------
+        # Convênios (SEM gráficos)
         st.markdown("### 🏥 Convênios com maior valor glosado")
         by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
         if by_conv.empty:
@@ -1480,19 +1493,13 @@ with tab_glosas:
         else:
             by_conv_top = by_conv.head(20)
             st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-            try:
-                chart_conv = by_conv_top.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
-            except Exception:
-                pass
 
-        # Exportação (sem “Visão geral”, “Situação de recurso” e “Analista”)
+        # Export análise XLSX (glosas)
         st.markdown("---")
         st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
         from io import BytesIO
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as wr:
-            # Metadados mínimos do filtro na aba KPIs
             k = analytics["kpis"] if analytics else dict(
                 linhas=len(df_view), periodo_ini=None, periodo_fim=None,
                 convenios=df_view[colmap["convenio"]].nunique() if colmap.get("convenio") in df_view.columns else 0,
@@ -1501,6 +1508,10 @@ with tab_glosas:
                 valor_glosado=float(df_view["_valor_glosa_abs"].sum()) if "_valor_glosa_abs" in df_view.columns else 0.0,
                 taxa_glosa=0.0
             )
+            conv_sel = st.session_state.get("conv_glosas", "(todos)")
+            modo_periodo = st.session_state.get("modo_periodo", "Todos os meses (agrupado)")
+            mes_sel_label = st.session_state.get("mes_pagto_sel", "")
+
             kpi_df = pd.DataFrame([{
                 "Convênio (filtro)": conv_sel,
                 "Modo Período": modo_periodo,
@@ -1516,6 +1527,7 @@ with tab_glosas:
             }])
             kpi_df.to_excel(wr, index=False, sheet_name="KPIs")
 
+            has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
             if has_pagto:
                 base_m = df_view[df_view["_is_glosa"] == True].copy()
                 if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
@@ -1540,7 +1552,7 @@ with tab_glosas:
                 analytics["by_convenio"].to_excel(wr, index=False, sheet_name="Convenios")
 
             col_export = [c for c in [
-                colmap.get("amhptiss"),  # inclui AMHPTISS no export do recorte
+                colmap.get("amhptiss"),
                 colmap.get("data_pagamento"),
                 colmap.get("data_realizado"),
                 colmap.get("convenio"), colmap.get("prestador"),
@@ -1552,7 +1564,6 @@ with tab_glosas:
             if not raw.empty:
                 raw.to_excel(wr, index=False, sheet_name="Bruto_Selecionado")
 
-            # Ajustes visuais
             for name in wr.sheets:
                 ws = wr.sheets[name]
                 ws.freeze_panes = "A2"
