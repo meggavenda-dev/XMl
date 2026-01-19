@@ -1397,8 +1397,7 @@ with tab_glosas:
         
             # Usa a seleção vigente do estado
             selected_item_name = st.session_state[sel_state_key]
-        
-            
+                                
             
             # ==========================================
             # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com coluna "Cobrança")
@@ -1419,14 +1418,24 @@ with tab_glosas:
                     "Verifique se há uma coluna como *AMHPTISS*, *AMHP TISS*, *Nº AMHPTISS*, etc."
                 )
             else:
-                c1, c2, c3 = st.columns([0.45, 0.35, 0.20])
+                # Linha do input (coluna ampla)
+                c1, c2 = st.columns([0.65, 0.35])
+            
                 with c1:
                     amhptiss_busca = st.text_input(
                         "Informe o Nº AMHPTISS",
                         value=st.session_state.amhp_result_num or "",
                         placeholder="Ex.: 61916098",
-                        key="amhptiss_lookup",  # ok se existir apenas este bloco de busca
+                        key="amhptiss_lookup",
                     )
+            
+                    # ⬇️ Botões LOGO ABAIXO do campo de texto, na mesma coluna
+                    bcol1, bcol2 = st.columns([0.5, 0.5])
+                    with bcol1:
+                        buscar_click = st.button("🔎 Buscar", key="btn_busca_amhptiss_tudo")
+                    with bcol2:
+                        fechar_click = st.button("❌ Fechar resultados", key="btn_fechar_amhptiss_result")
+            
                 with c2:
                     ignorar_filtros = st.checkbox(
                         "Ignorar filtros de Convênio/Mês",
@@ -1434,10 +1443,6 @@ with tab_glosas:
                         help="Busca no dataset inteiro (não apenas no recorte atual).",
                         key="amhp_ignorar_filtros"
                     )
-                with c3:
-                    # Dois botões lado a lado, cada um com sua key
-                    buscar_click = st.button("🔎 Buscar", key="btn_busca_amhptiss_tudo")
-                    fechar_click = st.button("❌ Fechar resultados", key="btn_fechar_amhptiss_result")
             
                 def _digits(s: str) -> str:
                     return re.sub(r"\D+", "", str(s or ""))
@@ -1446,7 +1451,6 @@ with tab_glosas:
                 if fechar_click:
                     st.session_state.amhp_result_df = None
                     st.session_state.amhp_result_num = None
-                    # Não precisa st.rerun(); a tabela deixa de ser exibida naturalmente
             
                 # Buscar: atualiza o estado com o novo resultado
                 if buscar_click:
@@ -1473,7 +1477,6 @@ with tab_glosas:
                     st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
             
                     if result.empty:
-                        # Mantém o bloco vazio exibido até que feche ou faça nova busca:
                         msg_filtros = " com os filtros atuais" if not ignorar_filtros else ""
                         st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg_filtros}.")
                     else:
@@ -1574,7 +1577,6 @@ with tab_glosas:
                         # Dica sobre filtros de mês/convênio
                         if not ignorar_filtros:
                             st.caption("Dica: se algum item da guia não aparecer, marque **“Ignorar filtros de Convênio/Mês”** acima.")
-
 
         
         # === DETALHES DO ITEM SELECIONADO (recolocado após a busca AMHPTISS) ===
