@@ -1523,32 +1523,48 @@ with tab_glosas:
                     st.markdown("---")
                     st.subheader(f"🧾 Itens da guia — AMHPTISS {numero_alvo}")
                 
+                    
                     # ================================
-                    # 📌 NOVO RESUMO DA GUIA
+                    # 📌 RESUMO DA GUIA (corrigido)
                     # ================================
-                    # Quantidade total de itens cobrados
+                    
+                    # Quantidade total de itens cobrados (todas as linhas encontradas para a guia)
                     qtd_cobrados = len(result)
-                
+                    
                     # Quantidade de itens glosados
-                    qtd_glosados = int((result.get("Glosado?") == "Sim").sum()) if "Glosado?" in result.columns else 0
-                
-                    # Total Cobrado (já renomeado)
-                    total_cobrado = float(
-                        pd.to_numeric(result.get("Valor Cobrado (R$)"), errors="coerce").fillna(0).sum()
-                    ) if "Valor Cobrado (R$)" in result.columns else 0.0
-                
-                    # Total Glosado (usa o valor ABSOLUTO)
-                    total_glosado = float(
-                        pd.to_numeric(result.get("Valor Glosado (R$)"), errors="coerce").abs().fillna(0).sum()
-                    ) if "Valor Glosado (R$)" in result.columns else 0.0
-                
-                    # Exibição — um item por linha
+                    qtd_glosados = int((result["_is_glosa"] == True).sum()) if "_is_glosa" in result.columns else 0
+                    
+                    # Total Cobrado (usando o nome ORIGINAL da coluna)
+                    col_valor_cobrado = colmap.get("valor_cobrado")
+                    if col_valor_cobrado and col_valor_cobrado in result.columns:
+                        total_cobrado = (
+                            pd.to_numeric(result[col_valor_cobrado], errors="coerce")
+                            .fillna(0)
+                            .sum()
+                        )
+                    else:
+                        total_cobrado = 0.0
+                    
+                    # Total Glosado (nome ORIGINAL da coluna)
+                    col_valor_glosa = colmap.get("valor_glosa")
+                    if col_valor_glosa and col_valor_glosa in result.columns:
+                        total_glosado = (
+                            pd.to_numeric(result[col_valor_glosa], errors="coerce")
+                            .abs()   # garante positivo
+                            .fillna(0)
+                            .sum()
+                        )
+                    else:
+                        total_glosado = 0.0
+                    
+                    # Mostrar
                     st.markdown("### 📌 Resumo da guia")
                     st.write(f"**Total Cobrado:** {f_currency(total_cobrado)}")
                     st.write(f"**Total Glosado:** {f_currency(total_glosado)}")
                     st.write(f"**Quantidade de itens cobrados:** {qtd_cobrados}")
                     st.write(f"**Quantidade de itens glosados:** {qtd_glosados}")
                     st.markdown("---")
+
                 
                     # Depois daqui segue seu código normal:
                     if result.empty:
