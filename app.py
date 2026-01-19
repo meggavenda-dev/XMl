@@ -885,12 +885,28 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
 # =========================================================
 # PARTE 6 — Interface (Uploads, Parâmetros, Processamento, Analytics, Export)
 # =========================================================
+
 with st.sidebar:
-    st.header("Parâmetros")
-    prazo_retorno = st.number_input("Prazo de retorno (dias) — (auditoria desativada)", min_value=0, value=30, step=1)
-    tolerance_valor = st.number_input("Tolerância p/ fallback por descrição (R$)", min_value=0.00, value=0.02, step=0.01, format="%.2f")
-    fallback_desc = st.toggle("Fallback por descrição + valor (quando código não casar)", value=False)
-    strip_zeros_codes = st.toggle("Normalizar códigos removendo zeros à esquerda", value=True)
+    # Agora a área de parâmetros está sempre FECHADA por padrão
+    with st.expander("⚙️ Parâmetros", expanded=False):
+        prazo_retorno = st.number_input(
+            "Prazo de retorno (dias) — (auditoria desativada)",
+            min_value=0, value=30, step=1
+        )
+        tolerance_valor = st.number_input(
+            "Tolerância p/ fallback por descrição (R$)",
+            min_value=0.00, value=0.02, 
+            step=0.01, format="%.2f"
+        )
+        fallback_desc = st.toggle(
+            "Fallback por descrição + valor (quando código não casar)",
+            value=False
+        )
+        strip_zeros_codes = st.toggle(
+            "Normalizar códigos removendo zeros à esquerda",
+            value=True
+        )
+
 
 tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
