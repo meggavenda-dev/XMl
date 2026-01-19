@@ -788,7 +788,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     }
     
 
-     🔧 NORMALIZAÇÃO GLOBAL — AMHPTISS sempre como string limpa (sem vírgula, sem ponto, sem notação científica)
+     #🔧 NORMALIZAÇÃO GLOBAL — AMHPTISS sempre como string limpa (sem vírgula, sem ponto, sem notação científica)
     amhp_col = colmap.get("amhptiss")
     if amhp_col and amhp_col in df.columns:
         df[amhp_col] = (
