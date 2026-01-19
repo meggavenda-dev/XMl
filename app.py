@@ -1408,19 +1408,18 @@ with tab_glosas:
             )
         
             st.dataframe(conv_df_fmt, use_container_width=True, height=320)
-
-        
+            
             # ================================
             # Top 20 — Motivos de glosa por maior valor glosado
-            # (mostra TOP 5 fixo e restante com rolagem)
+            # (um ÚNICO quadro: visíveis ~5 linhas, demais via rolagem)
             # ================================
             st.markdown("### Top 20 — Motivos de glosa por **maior valor glosado**")
             
             mot_df = analytics["top_motivos"] if analytics else pd.DataFrame()
             if mot_df.empty:
-                st.info("Não foi possível montar o ranking de motivos (verifique colunas de **Motivo Glosa** e **Descrição Glosa** no(s) arquivo(s)).")
+                st.info("Não foi possível montar o ranking de motivos (verifique as colunas de 'Motivo Glosa' e 'Descrição Glosa' nos arquivos).")
             else:
-                # Nome da coluna de glosa: pode vir como "Valor Glosado (R$)" (renomeado) ou "Valor_Glosado"
+                # Detecta a coluna de valor glosado
                 gl_col = "Valor Glosado (R$)" if "Valor Glosado (R$)" in mot_df.columns else (
                     "Valor_Glosado" if "Valor_Glosado" in mot_df.columns else None
                 )
@@ -1431,7 +1430,7 @@ with tab_glosas:
                     if gl_col != "Valor Glosado (R$)":
                         mot_view = mot_view.rename(columns={gl_col: "Valor Glosado (R$)"})
             
-                    # Ordenar por valor glosado desc e Qtd desc (se existir)
+                    # Ordenar por Valor Glosado desc e, se existir, por Qtd desc
                     if "Qtd" in mot_view.columns:
                         mot_view = mot_view.sort_values(["Valor Glosado (R$)", "Qtd"], ascending=[False, False])
                     else:
@@ -1440,34 +1439,16 @@ with tab_glosas:
                     # Limitar ao TOP 20
                     mot_view = mot_view.head(20)
             
-                    # Seleção de colunas (código do motivo, descrição e valor total glosado)
+                    # Exibir SOMENTE as 3 colunas solicitadas (código, descrição, valor total glosado)
                     cols_show = [c for c in ["Motivo", "Descrição do Motivo", "Valor Glosado (R$)"] if c in mot_view.columns]
-                    if not cols_show:
-                        # fallback mínimo
-                        cols_show = [col for col in mot_view.columns if col in ("Motivo", "Descrição do Motivo")] + ["Valor Glosado (R$)"]
+                    mot_view_fmt = apply_currency(mot_view[cols_show], ["Valor Glosado (R$)"])
             
-                    # Quebra em TOP 5 + restante
-                    top5 = mot_view.head(5).copy()
-                    restante = mot_view.iloc[5:].copy()
-            
-                    st.markdown("**TOP 5**")
+                    # Um ÚNICO quadro com barra de rolagem (altura ~5 linhas)
                     st.dataframe(
-                        apply_currency(top5[cols_show], ["Valor Glosado (R$)"]),
+                        mot_view_fmt,
                         use_container_width=True,
-                        height=220
+                        height=260   # ajuste fino, ~5 linhas visíveis; a partir da 6ª rola
                     )
-            
-                    if not restante.empty:
-                        st.markdown("**Outros motivos**")
-                        # altura maior para habilitar a barra de rolagem da tabela
-                        st.dataframe(
-                            apply_currency(restante[cols_show], ["Valor Glosado (R$)"]),
-                            use_container_width=True,
-                            height=360
-                        )
-                    else:
-                        st.caption("Não há mais motivos além dos TOP 5 no recorte atual.")
-
 
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
