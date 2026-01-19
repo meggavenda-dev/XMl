@@ -1290,9 +1290,8 @@ with tab_glosas:
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
         else:
-            
             mot = analytics["top_motivos"].head(20).copy()
-            
+        
             # 🔧 Normalizar "Motivo" para string sem vírgulas/pontos
             if "Motivo" in mot.columns:
                 mot["Motivo"] = (
@@ -1301,13 +1300,13 @@ with tab_glosas:
                     .str.replace(r"[^\d]", "", regex=True)  # deixa só dígitos
                     .str.strip()
                 )
-            
+        
             st.dataframe(
                 apply_currency(mot, ["Valor Glosado (R$)"]),
                 use_container_width=True,
                 height=360
             )
-            st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
+
 
         #st.markdown("### 🧷 Tipo de glosa")
         #by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
