@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX)
-# (Versão: Detalhes só com glosa + Busca AMHPTISS + SEM gráficos na aba Faturas Glosadas)
+# (Versão: Detalhes só com glosa + Busca AMHPTISS + SEM gráficos na aba Faturas Glosadas + coluna "Cobrança")
 # =========================================================
 from __future__ import annotations
 
@@ -782,6 +782,9 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
                 "amhptiss", "amhp tiss", "nº amhptiss", "numero amhptiss", "número amhptiss"
             } or "amhptiss" in str(c).strip().lower() or str(c).strip() == "Amhptiss"
         ), None),
+
+        # NOVO: status "Cobrança" (ex.: Normal, Glosa Posterior)
+        "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
 
     # Números
@@ -882,12 +885,28 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
 # =========================================================
 # PARTE 6 — Interface (Uploads, Parâmetros, Processamento, Analytics, Export)
 # =========================================================
+
 with st.sidebar:
-    st.header("Parâmetros")
-    prazo_retorno = st.number_input("Prazo de retorno (dias) — (auditoria desativada)", min_value=0, value=30, step=1)
-    tolerance_valor = st.number_input("Tolerância p/ fallback por descrição (R$)", min_value=0.00, value=0.02, step=0.01, format="%.2f")
-    fallback_desc = st.toggle("Fallback por descrição + valor (quando código não casar)", value=False)
-    strip_zeros_codes = st.toggle("Normalizar códigos removendo zeros à esquerda", value=True)
+    # Agora a área de parâmetros está sempre FECHADA por padrão
+    with st.expander("⚙️ Parâmetros", expanded=False):
+        prazo_retorno = st.number_input(
+            "Prazo de retorno (dias) — (auditoria desativada)",
+            min_value=0, value=30, step=1
+        )
+        tolerance_valor = st.number_input(
+            "Tolerância p/ fallback por descrição (R$)",
+            min_value=0.00, value=0.02, 
+            step=0.01, format="%.2f"
+        )
+        fallback_desc = st.toggle(
+            "Fallback por descrição + valor (quando código não casar)",
+            value=False
+        )
+        strip_zeros_codes = st.toggle(
+            "Normalizar códigos removendo zeros à esquerda",
+            value=True
+        )
+
 
 tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
@@ -1207,7 +1226,7 @@ with tab_glosas:
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
         # ==========================================
-        # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com colunas explícitas)
+        # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com coluna "Cobrança")
         # ==========================================
         st.markdown("### 🔎 Buscar por **Nº AMHPTISS** (tudo que foi cobrado)")
         amhp_col = colmap.get("amhptiss")
@@ -1258,17 +1277,17 @@ with tab_glosas:
                         msg_filtros = " com os filtros atuais" if not ignorar_filtros else ""
                         st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg_filtros}.")
                     else:
-                        # Coluna “Glosado?” e padronização dos nomes de colunas de valor
+                        # Coluna “Glosado?”
                         if "_is_glosa" in result.columns:
                             result["Glosado?"] = result["_is_glosa"].map({True: "Sim", False: "Não"})
                         else:
                             result["Glosado?"] = "—"
 
+                        # Renome de valores
                         col_valor_cobrado  = colmap.get("valor_cobrado")
                         col_valor_glosa    = colmap.get("valor_glosa")
                         col_valor_recursa  = colmap.get("valor_recursado")
 
-                        # Renomeia para exposição clara
                         ren = {}
                         if col_valor_cobrado and col_valor_cobrado in result.columns:
                             ren[col_valor_cobrado] = "Valor Cobrado (R$)"
@@ -1298,7 +1317,19 @@ with tab_glosas:
                             f"• **Total Glosado:** {f_currency(total_glosado)}"
                         )
 
-                        # Colunas a exibir (sempre trazendo Cobrado/Glosado se existirem)
+                        # >>> NOVO: mini-resumo por status de Cobrança
+                        if colmap.get("cobranca") and colmap["cobranca"] in result.columns:
+                            dist = (
+                                result[colmap["cobranca"]]
+                                .fillna("(sem informação)")
+                                .astype(str).str.strip()
+                                .value_counts()
+                            )
+                            if not dist.empty:
+                                resumo = " • ".join([f"{k}: {int(v)}" for k, v in dist.items()])
+                                st.caption(f"**Distribuição por Cobrança:** {resumo}")
+
+                        # Colunas a exibir: incluir "Cobrança" se existir
                         possiveis = [
                             amhp_col,
                             colmap.get("convenio"),
@@ -1309,6 +1340,10 @@ with tab_glosas:
                             colmap.get("tipo_glosa"),
                             colmap.get("data_realizado"),
                             colmap.get("data_pagamento"),
+
+                            # NOVO
+                            colmap.get("cobranca"),
+
                             "Valor Cobrado (R$)",
                             "Valor Glosado (R$)",
                             "Valor Recursado (R$)",
@@ -1440,6 +1475,10 @@ with tab_glosas:
                             colmap.get("data_realizado"),
                             colmap.get("motivo"),
                             colmap.get("desc_motivo"),
+
+                            # NOVO: status Cobrança
+                            colmap.get("cobranca"),
+
                             colmap.get("valor_cobrado"),
                             colmap.get("valor_glosa"),
                             colmap.get("valor_recursado"),
@@ -1558,6 +1597,10 @@ with tab_glosas:
                 colmap.get("convenio"), colmap.get("prestador"),
                 colmap.get("descricao"), colmap.get("tipo_glosa"),
                 colmap.get("motivo"), colmap.get("desc_motivo"),
+
+                # NOVO: incluir "Cobrança" no export bruto selecionado
+                colmap.get("cobranca"),
+
                 colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
             ] if c and c in df_view.columns]
             raw = df_view[col_export].copy() if col_export else pd.DataFrame()
