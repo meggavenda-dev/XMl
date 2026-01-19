@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # app.py — TISS XML + Conciliação & Analytics + Leitor de Glosas (XLSX)
-# (Versão sem Selenium/Portal AMHP + Detalhes inline nos Top Itens + Busca AMHPTISS com tudo cobrado)
+# (Versão: Detalhes só com glosa + Busca AMHPTISS + SEM gráficos na aba Faturas Glosadas)
 # =========================================================
 from __future__ import annotations
 
@@ -892,7 +892,7 @@ with st.sidebar:
 tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
 # =========================================================
-# ABA 1 — Conciliação TISS
+# ABA 1 — Conciliação TISS (mantida com gráficos)
 # =========================================================
 with tab_conc:
     st.subheader("📤 Upload de arquivos")
@@ -1103,7 +1103,7 @@ with tab_conc:
         )
 
 # =========================================================
-# ABA 2 — Faturas Glosadas (XLSX)
+# ABA 2 — Faturas Glosadas (XLSX) (SEM gráficos)
 # =========================================================
 with tab_glosas:
     st.subheader("Leitor de Faturas Glosadas (XLSX) — independente do XML/Demonstrativo")
@@ -1339,7 +1339,7 @@ with tab_glosas:
                         if not ignorar_filtros:
                             st.caption("Dica: se algum item da guia não aparecer, marque **“Ignorar filtros de Convênio/Mês”** acima.")
 
-        # Série mensal (Pagamento)
+        # Série mensal (Pagamento) — SEM gráficos
         st.markdown("### 📅 Glosa por **mês de pagamento**")
         has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
         if has_pagto:
@@ -1363,17 +1363,10 @@ with tab_glosas:
                     }), ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
                     use_container_width=True, height=260
                 )
-                try:
-                    st.bar_chart(
-                        mensal.set_index("_pagto_mes_br")[["Valor_Glosado"]]
-                              .rename(columns={"Valor_Glosado":"Valor Glosado (R$)"})
-                    )
-                except Exception:
-                    pass
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # ---------- Top motivos / Tipos ----------
+        # ---------- Top motivos / Tipos (SEM gráficos) ----------
         analytics = build_glosas_analytics(df_view, colmap)
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
@@ -1381,11 +1374,6 @@ with tab_glosas:
         else:
             mot = analytics["top_motivos"].head(20)
             st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-            try:
-                chart_mot = mot.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                st.bar_chart(chart_mot.set_index("Descrição do Motivo")["Valor_Glosado"])
-            except Exception:
-                pass
 
         st.markdown("### 🧷 Tipo de glosa")
         by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
@@ -1394,47 +1382,36 @@ with tab_glosas:
         else:
             st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
-        # ---------- Itens/descrições com maior valor glosado (com detalhes inline) ----------
+        # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
         if top_itens.empty:
             st.info("Coluna de 'Descrição' não encontrada.")
         else:
             df_items = top_itens.copy()
-            # Renomeia a coluna de descrição, se necessário
             if "Descrição do Item" not in df_items.columns:
                 desc_col = colmap.get("descricao")
                 if desc_col and desc_col in df_items.columns:
                     df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
-
-            # Fallback do nome da coluna de valor, se ainda não estiver renomeada
             if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
                 df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
 
             df_items_top = df_items.head(20).copy()
-
-            # Lista/visão geral
             st.dataframe(
                 apply_currency(df_items_top, ["Valor Glosado (R$)"]),
                 use_container_width=True,
                 height=360
             )
-            st.caption("Abra o **🔎 Detalhes** abaixo de cada item para ver a relação completa (na própria tela).")
+            st.caption("Abra o **🔎 Detalhes** abaixo de cada item para ver a relação completa (somente guias glosadas).")
 
-            # 🔎 Detalhes inline por item (APENAS guias com glosa)
             desc_col_map = colmap.get("descricao")
-
             if not desc_col_map or desc_col_map not in df_view.columns:
                 st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
             else:
                 for i, row in df_items_top.reset_index(drop=True).iterrows():
                     item_nome = row.get("Descrição do Item", "")
-                    valor_item = row.get("Valor Glosado (R$)")
-                    if pd.isna(valor_item) and "Valor_Glosado" in row.index:
-                        valor_item = row["Valor_Glosado"]
-
                     with st.expander(f"🔎 Detalhes — {item_nome}"):
-                        # >>>>>>>>> ALTERAÇÃO: aplicar filtro _is_glosa == True <<<<<<<<<
+                        # Apenas guias glosadas daquele item
                         df_item = df_view[
                             (df_view[desc_col_map].astype(str) == str(item_nome)) &
                             (df_view["_is_glosa"] == True)
@@ -1447,7 +1424,7 @@ with tab_glosas:
                             )
                             continue
 
-                        # Detecta colunas úteis
+                        # Colunas relevantes
                         amhp_col2 = colmap.get("amhptiss")
                         if not amhp_col2:
                             for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
@@ -1469,7 +1446,6 @@ with tab_glosas:
                         ]
                         show_cols = [c for c in possiveis if c and c in df_item.columns]
 
-                        # Totais apenas do conjunto glosado exibido
                         total_reg = len(df_item)
                         total_cobrado_item = 0.0
                         if colmap.get("valor_cobrado") in df_item.columns:
@@ -1481,7 +1457,6 @@ with tab_glosas:
                             f"**Glosa (lista):** {f_currency(total_glosa_item)}"
                         )
 
-                        # Formatar moedas
                         money_cols_fmt = []
                         if colmap.get("valor_cobrado") and (colmap["valor_cobrado"] in show_cols):
                             money_cols_fmt.append(colmap["valor_cobrado"])
@@ -1490,7 +1465,6 @@ with tab_glosas:
                         if colmap.get("valor_recursado") and (colmap["valor_recursado"] in show_cols):
                             money_cols_fmt.append(colmap["valor_recursado"])
 
-                        # Ordenação por maior glosa
                         if "_valor_glosa_abs" in df_item.columns:
                             df_item = df_item.sort_values("_valor_glosa_abs", ascending=False)
 
@@ -1511,7 +1485,7 @@ with tab_glosas:
                             mime="text/csv",
                         )
 
-        # Convênios
+        # Convênios (SEM gráficos)
         st.markdown("### 🏥 Convênios com maior valor glosado")
         by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
         if by_conv.empty:
@@ -1519,11 +1493,6 @@ with tab_glosas:
         else:
             by_conv_top = by_conv.head(20)
             st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
-            try:
-                chart_conv = by_conv_top.rename(columns={"Valor Glosado (R$)":"Valor_Glosado"}).head(10)
-                st.bar_chart(chart_conv.set_index("Convênio")["Valor_Glosado"])
-            except Exception:
-                pass
 
         # Export análise XLSX (glosas)
         st.markdown("---")
