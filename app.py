@@ -385,21 +385,23 @@ def _apply_manual_map(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
         if not c or c == "(não usar)" or c not in df.columns:
             return None
         return df[c]
-    out = pd.DataFrame({
-        "numero_lote": pick("lote"),
-        "competencia": pick("competencia"),
-        "numeroGuiaPrestador": pick("guia_prest"),
-        "numeroGuiaOperadora": pick("guia_oper"),
-        "codigo_procedimento": pick("cod_proc"),
-        "descricao_procedimento": pick("desc_proc"),
-        "quantidade_apresentada": pd.to_numeric(pick("qtd_apres"), errors="coerce) if pick("qtd_apres") is not None else 0,
-        "quantidade_paga": pd.to_numeric(pick("qtd_paga"), errors="coerce") if pick("qtd_paga") is not None else 0,
-        "valor_apresentado": pd.to_numeric(pick("val_apres"), errors="coerce") if pick("val_apres") is not None else 0,
-        "valor_glosa": pd.to_numeric(pick("val_glosa"), errors="coerce") if pick("val_glosa") is not None else 0,
-        "valor_pago": pd.to_numeric(pick("val_pago"), errors="coerce") if pick("val_pago") is not None else 0,
-        "motivo_glosa_codigo": pick("motivo_cod"),
-        "motivo_glosa_descricao": pick("motivo_desc"),
-    })
+    
+        out = pd.DataFrame({
+            "numero_lote": pick("lote"),
+            "competencia": pick("competencia"),
+            "numeroGuiaPrestador": pick("guia_prest"),
+            "numeroGuiaOperadora": pick("guia_oper"),
+            "codigo_procedimento": pick("cod_proc"),
+            "descricao_procedimento": pick("desc_proc"),
+            "quantidade_apresentada": pd.to_numeric(pick("qtd_apres"), errors="coerce") if pick("qtd_apres") is not None else 0,
+            "quantidade_paga": pd.to_numeric(pick("qtd_paga"), errors="coerce") if pick("qtd_paga") is not None else 0,
+            "valor_apresentado": pd.to_numeric(pick("val_apres"), errors="coerce") if pick("val_apres") is not None else 0,
+            "valor_glosa": pd.to_numeric(pick("val_glosa"), errors="coerce") if pick("val_glosa") is not None else 0,
+            "valor_pago": pd.to_numeric(pick("val_pago"), errors="coerce") if pick("val_pago") is not None else 0,
+            "motivo_glosa_codigo": pick("motivo_cod"),
+            "motivo_glosa_descricao": pick("motivo_desc"),
+        })
+
     for c in ["numero_lote","numeroGuiaPrestador","numeroGuiaOperadora","codigo_procedimento"]:
         out[c] = out[c].astype(str).str.strip()
     for c in ["valor_apresentado","valor_glosa","valor_pago","quantidade_apresentada","quantidade_paga"]:
