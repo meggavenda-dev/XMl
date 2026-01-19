@@ -128,6 +128,7 @@ def _cached_xml_bytes(b: bytes) -> List[Dict]:
     from io import BytesIO
     return parse_itens_tiss_xml(BytesIO(b))
 
+
 # =========================================================
 # PARTE 2 — XML TISS → Itens por guia
 # =========================================================
@@ -284,6 +285,7 @@ def tratar_codigo_glosa(df: pd.DataFrame) -> pd.DataFrame:
     df["motivo_glosa_codigo"]    = df["motivo_glosa_codigo"].fillna("").str.strip()
     df["motivo_glosa_descricao"] = df["motivo_glosa_descricao"].fillna("").str.strip()
     return df
+
 
 def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
     try:
@@ -495,6 +497,7 @@ def build_demo_df(demo_files, strip_zeros_codes=False) -> pd.DataFrame:
         return pd.concat(parts, ignore_index=True)
     return pd.DataFrame()
 
+
 # =========================================================
 # PARTE 4 — Conciliação (XML × Demonstrativo) + Analytics
 # =========================================================
@@ -635,6 +638,7 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
     )
     return grp.sort_values('competencia')
 
+
 def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 0.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
     base = df_conc.copy()
     if base.empty:
@@ -745,12 +749,18 @@ def _pick_col(df: pd.DataFrame, *candidates):
                 return c
     return None
 
+
 @st.cache_data(show_spinner=False)
 def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     """
     Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP ou similar),
     concatena e retorna (df, colmap) com mapeamento de colunas.
     Cria sempre colunas de Pagamento derivadas (_pagto_dt/_ym/_mes_br).
+
+    Correções:
+      • "Valor Cobrado" passa a usar "Valor Original" (override)
+      • "Realizado": NÃO combinar com "Horário". Só coluna exatamente "Realizado".
+        Se houver duplicatas, usa a ÚLTIMA.
     """
     if not files:
         return pd.DataFrame(), {}
@@ -764,12 +774,13 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     df = pd.concat(parts, ignore_index=True)
     cols = df.columns
 
+    # ---------- Mapeamento inicial ----------
     colmap = {
         "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
         "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
         "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
         "data_pagamento": next((c for c in cols if "Pagamento" in str(c)), None),
-        "data_realizado": next((c for c in cols if "Realizado" in str(c)), None),
+        "data_realizado": None,  # será definido com critério robusto abaixo
         "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
         "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
         "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
@@ -782,25 +793,58 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
                 "amhptiss", "amhp tiss", "nº amhptiss", "numero amhptiss", "número amhptiss"
             } or "amhptiss" in str(c).strip().lower() or str(c).strip() == "Amhptiss"
         ), None),
-
-        # NOVO: status "Cobrança" (ex.: Normal, Glosa Posterior)
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
 
-    # Números
-    for c in [colmap["valor_cobrado"], colmap["valor_glosa"], colmap["valor_recursado"]]:
+    # ---------- "Realizado" robusto (sem "Horário") ----------
+    norm_cols = [(c, re.sub(r"\s+", " ", str(c)).strip().lower()) for c in cols]
+    realizado_exact = [c for c, n in norm_cols if n == "realizado"]
+    if not realizado_exact:
+        realizado_contains = [c for c, n in norm_cols if ("realizado" in n) and ("horar" not in n)]
+    else:
+        realizado_contains = []
+    if realizado_exact:
+        col_data_realizado = realizado_exact[-1]
+    elif realizado_contains:
+        col_data_realizado = realizado_contains[-1]
+    else:
+        col_data_realizado = None
+    colmap["data_realizado"] = col_data_realizado
+
+    # ---------- "Valor Cobrado" ← "Valor Original" ----------
+    col_valor_original = next((c for c in cols if str(c).strip().lower() == "valor original"), None)
+    if col_valor_original:
+        colmap["valor_original"] = col_valor_original
+        if colmap["valor_cobrado"] and colmap["valor_cobrado"] in df.columns:
+            df[colmap["valor_cobrado"]] = df[col_valor_original]
+        else:
+            colmap["valor_cobrado"] = col_valor_original
+
+    # ---------- Normalização AMHPTISS ----------
+    amhp_col = colmap.get("amhptiss")
+    if amhp_col and amhp_col in df.columns:
+        df[amhp_col] = (
+            df[amhp_col]
+            .astype(str)
+            .str.replace(r"[^\d]", "", regex=True)
+            .str.strip()
+        )
+
+    # ---------- Números ----------
+    for c in [colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Datas
-    if colmap["data_realizado"] and colmap["data_realizado"] in df.columns:
-        df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
-
-    # Pagamento (sempre cria derivadas)
-    if colmap["data_pagamento"] and colmap["data_pagamento"] in df.columns:
-        df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce")
+    # ---------- Datas ----------
+    if colmap.get("data_realizado") and colmap["data_realizado"] in df.columns:
+        df[colmap["data_realizado"]] = pd.to_datetime(
+            df[colmap["data_realizado"]], errors="coerce", dayfirst=True
+        )
+    if colmap.get("data_pagamento") and colmap["data_pagamento"] in df.columns:
+        df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce", dayfirst=True)
     else:
         df["_pagto_dt"] = pd.NaT
+
     if "_pagto_dt" in df.columns and df["_pagto_dt"].notna().any():
         df["_pagto_ym"] = df["_pagto_dt"].dt.to_period("M")
         df["_pagto_mes_br"] = df["_pagto_dt"].dt.strftime("%m/%Y")
@@ -808,8 +852,8 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         df["_pagto_ym"] = pd.NaT
         df["_pagto_mes_br"] = ""
 
-    # Flags de glosa
-    if colmap["valor_glosa"] in df.columns:
+    # ---------- Flags de glosa ----------
+    if colmap.get("valor_glosa") in df.columns:
         df["_is_glosa"] = df[colmap["valor_glosa"]] < 0
         df["_valor_glosa_abs"] = df[colmap["valor_glosa"]].abs()
     else:
@@ -906,7 +950,6 @@ with st.sidebar:
             "Normalizar códigos removendo zeros à esquerda",
             value=True
         )
-
 
 tab_conc, tab_glosas = st.tabs(["🔗 Conciliação TISS", "📑 Faturas Glosadas (XLSX)"])
 
@@ -1220,202 +1263,99 @@ with tab_glosas:
 
         # Aplicar filtros
         df_view = df_g.copy()
+        amhp_col = colmap.get("amhptiss")
+        if amhp_col and amhp_col in df_view.columns:
+            df_view[amhp_col] = (
+                df_view[amhp_col]
+                .astype(str)
+                .str.replace(r"[^\d]", "", regex=True)
+                .str.strip()
+            )
         if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
             df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
         if has_pagto and mes_sel_label:
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
-        # ==========================================
-        # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com coluna "Cobrança")
-        # ==========================================
-        st.markdown("### 🔎 Buscar por **Nº AMHPTISS** (tudo que foi cobrado)")
-        amhp_col = colmap.get("amhptiss")
-        if not amhp_col or amhp_col not in df_g.columns:
-            st.info(
-                "Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados. "
-                "Verifique se há uma coluna como *AMHPTISS*, *AMHP TISS*, *Nº AMHPTISS*, etc."
-            )
-        else:
-            c1, c2 = st.columns([0.55, 0.45])
-            with c1:
-                amhptiss_busca = st.text_input(
-                    "Informe o Nº AMHPTISS",
-                    value="",
-                    placeholder="Ex.: 61916098",
-                    key="amhptiss_lookup",
-                )
-            with c2:
-                ignorar_filtros = st.checkbox(
-                    "Ignorar filtros de Convênio/Mês",
-                    value=False,
-                    help="Busca no dataset inteiro (não apenas no recorte atual)."
-                )
-
-            # Botão de busca
-            buscar_click = st.button("🔎 Buscar", key="btn_busca_amhptiss_tudo")
-
-            def _digits(s: str) -> str:
-                return re.sub(r"\D+", "", str(s or ""))
-
-            if buscar_click:
-                numero_alvo = _digits(amhptiss_busca)
-                if not numero_alvo:
-                    st.warning("Informe um número AMHPTISS válido (somente dígitos).")
-                else:
-                    # Fonte da busca: df_g (todos os dados) ou df_view (recorte atual)?
-                    df_base_busca = df_g if ignorar_filtros else df_view
-                    df_tmp = df_base_busca.copy()
-                    df_tmp["_amhp_digits"] = df_tmp[amhp_col].astype(str).map(_digits)
-
-                    # Resultado da guia (SEM filtrar por glosa → traz tudo que foi cobrado)
-                    result = df_tmp[df_tmp["_amhp_digits"] == numero_alvo].copy()
-
-                    st.markdown("---")
-                    st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
-
-                    if result.empty:
-                        msg_filtros = " com os filtros atuais" if not ignorar_filtros else ""
-                        st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg_filtros}.")
-                    else:
-                        # Coluna “Glosado?”
-                        if "_is_glosa" in result.columns:
-                            result["Glosado?"] = result["_is_glosa"].map({True: "Sim", False: "Não"})
-                        else:
-                            result["Glosado?"] = "—"
-
-                        # Renome de valores
-                        col_valor_cobrado  = colmap.get("valor_cobrado")
-                        col_valor_glosa    = colmap.get("valor_glosa")
-                        col_valor_recursa  = colmap.get("valor_recursado")
-
-                        ren = {}
-                        if col_valor_cobrado and col_valor_cobrado in result.columns:
-                            ren[col_valor_cobrado] = "Valor Cobrado (R$)"
-                        if col_valor_glosa and col_valor_glosa in result.columns:
-                            ren[col_valor_glosa]   = "Valor Glosado (R$)"
-                        if col_valor_recursa and col_valor_recursa in result.columns:
-                            ren[col_valor_recursa] = "Valor Recursado (R$)"
-                        result = result.rename(columns=ren)
-
-                        # Totais
-                        total_linhas = len(result)
-                        total_cobrado = float(
-                            pd.to_numeric(result.get("Valor Cobrado (R$)"), errors="coerce").fillna(0).sum()
-                        ) if "Valor Cobrado (R$)" in result.columns else 0.0
-                        total_glosado = float(
-                            pd.to_numeric(result.get("Valor Glosado (R$)"), errors="coerce").fillna(0).sum()
-                        ) if "Valor Glosado (R$)" in result.columns else 0.0
-
-                        n_glos = int((result["Glosado?"] == "Sim").sum()) if "Glosado?" in result.columns else 0
-                        n_nao  = total_linhas - n_glos
-
-                        st.write(
-                            f"**Registros:** {total_linhas} "
-                            f"• **Glosados:** {n_glos} "
-                            f"• **Não glosados:** {n_nao} "
-                            f"• **Total Cobrado:** {f_currency(total_cobrado)} "
-                            f"• **Total Glosado:** {f_currency(total_glosado)}"
-                        )
-
-                        # >>> NOVO: mini-resumo por status de Cobrança
-                        if colmap.get("cobranca") and colmap["cobranca"] in result.columns:
-                            dist = (
-                                result[colmap["cobranca"]]
-                                .fillna("(sem informação)")
-                                .astype(str).str.strip()
-                                .value_counts()
-                            )
-                            if not dist.empty:
-                                resumo = " • ".join([f"{k}: {int(v)}" for k, v in dist.items()])
-                                st.caption(f"**Distribuição por Cobrança:** {resumo}")
-
-                        # Colunas a exibir: incluir "Cobrança" se existir
-                        possiveis = [
-                            amhp_col,
-                            colmap.get("convenio"),
-                            colmap.get("prestador"),
-                            colmap.get("descricao"),
-                            colmap.get("motivo"),
-                            colmap.get("desc_motivo"),
-                            colmap.get("tipo_glosa"),
-                            colmap.get("data_realizado"),
-                            colmap.get("data_pagamento"),
-
-                            # NOVO
-                            colmap.get("cobranca"),
-
-                            "Valor Cobrado (R$)",
-                            "Valor Glosado (R$)",
-                            "Valor Recursado (R$)",
-                            "Glosado?",
-                        ]
-                        show_cols = [c for c in possiveis if c and c in result.columns]
-                        if not show_cols:
-                            show_cols = result.columns.tolist()
-
-                        # Formatação de moeda
-                        money_cols = [c for c in ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"] if c in show_cols]
-
-                        st.dataframe(
-                            apply_currency(result[show_cols], money_cols),
-                            use_container_width=True,
-                            height=420
-                        )
-
-                        # Export
-                        st.download_button(
-                            "⬇️ Baixar resultado (CSV)",
-                            data=result[show_cols].to_csv(index=False).encode("utf-8"),
-                            file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
-                            mime="text/csv",
-                        )
-
-                        # Dica sobre filtros de mês/convênio
-                        if not ignorar_filtros:
-                            st.caption("Dica: se algum item da guia não aparecer, marque **“Ignorar filtros de Convênio/Mês”** acima.")
-
-        # Série mensal (Pagamento) — SEM gráficos
+        # Série mensal (Pagamento) — SEM gráficos (sempre soma o Valor Cobrado = Valor Original)
         st.markdown("### 📅 Glosa por **mês de pagamento**")
         has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
         if has_pagto:
             base_m = df_view[df_view["_is_glosa"] == True].copy()
             if base_m.empty:
                 st.info("Sem glosas no recorte atual.")
-            else:
-                if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                           Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
-                else:
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                           Valor_Cobrado=("_valor_glosa_abs","size")))
-                mensal = mensal.sort_values("_pagto_ym")
-                st.dataframe(
-                    apply_currency(mensal.rename(columns={
-                        "Valor_Glosado":"Valor Glosado (R$)",
-                        "Valor_Cobrado":"Valor Cobrado (R$)"
-                    }), ["Valor Glosado (R$)", "Valor Cobrado (R$)"]),
-                    use_container_width=True, height=260
+            else:                
+                # ========================
+                # 📅 Glosa por mês de pagamento — versão personalizada
+                # ========================
+                mensal = (
+                    base_m.groupby(["_pagto_ym", "_pagto_mes_br"], as_index=False)
+                          .agg(
+                              Valor_Glosado=("_valor_glosa_abs", "sum"),
+                              Valor_Cobrado=(colmap["valor_cobrado"], "sum"),
+                              Valor_Recursado=(colmap["valor_recursado"], "sum") if colmap.get("valor_recursado") in base_m.columns else ("_valor_glosa_abs", "size")
+                          )
+                          .sort_values("_pagto_ym")
                 )
+                
+                # 1) Renomear colunas
+                mensal = mensal.rename(columns={
+                    "_pagto_mes_br": "Mês de Pagamento",
+                    "Valor_Glosado": "Valor Glosado (R$)",
+                    "Valor_Cobrado": "Valor Cobrado (R$)",
+                    "Valor_Recursado": "Valor Recursado (R$)",
+                })
+                
+                # 2) Selecionar somente as 4 colunas desejadas
+                cols_final = [
+                    "Mês de Pagamento",
+                    "Valor Cobrado (R$)",
+                    "Valor Glosado (R$)",
+                    "Valor Recursado (R$)"
+                ]
+                mensal = mensal[cols_final]
+                
+                # 3) Formatar moeda
+                mensal_fmt = apply_currency(
+                    mensal,
+                    ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]
+                )
+                
+                # 4) Exibir
+                st.dataframe(mensal_fmt, use_container_width=True, height=260)
+
         else:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
-        # ---------- Top motivos / Tipos (SEM gráficos) ----------
+        # ==========================================
+        # Seções seguintes
+        # ==========================================
         analytics = build_glosas_analytics(df_view, colmap)
+
+        st.markdown("### 🏥 Convênios com maior valor glosado")
+        by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
+        if by_conv.empty:
+            st.info("Coluna de 'Convênio' não encontrada.")
+        else:
+            by_conv_top = by_conv.head(20)
+            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
         else:
-            mot = analytics["top_motivos"].head(20)
-            st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
-
-        st.markdown("### 🧷 Tipo de glosa")
-        by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
-        if by_tipo.empty:
-            st.info("Coluna de 'Tipo de Glosa' não encontrada.")
-        else:
-            st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+            mot = analytics["top_motivos"].head(20).copy()
+            if "Motivo" in mot.columns:
+                mot["Motivo"] = (
+                    mot["Motivo"]
+                    .astype(str)
+                    .str.replace(r"[^\d]", "", regex=True)
+                    .str.strip()
+                )
+            st.dataframe(
+                apply_currency(mot, ["Valor Glosado (R$)"]),
+                use_container_width=True,
+                height=360
+            )
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
@@ -1431,109 +1371,330 @@ with tab_glosas:
             if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
                 df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
 
+            if "Qtd" not in df_items.columns:
+                if colmap and "_is_glosa" in df_view.columns and colmap.get("descricao") in df_view.columns:
+                    qtd_series = (
+                        df_view[df_view["_is_glosa"] == True]
+                        .groupby(colmap["descricao"])["_is_glosa"]
+                        .size()
+                    )
+                    df_items["Qtd"] = df_items["Descrição do Item"].map(qtd_series).fillna(0).astype(int)
+                else:
+                    df_items["Qtd"] = 0
+
             df_items_top = df_items.head(20).copy()
-            st.dataframe(
-                apply_currency(df_items_top, ["Valor Glosado (R$)"]),
+            df_items_show = apply_currency(df_items_top.copy(), ["Valor Glosado (R$)"])
+
+            sel_state_key = "top_itens_editor_selected"
+            ver_key       = "top_itens_editor_version"
+            if ver_key not in st.session_state:
+                st.session_state[ver_key] = 0
+            if sel_state_key not in st.session_state:
+                st.session_state[sel_state_key] = None
+
+            selected_item_name = st.session_state[sel_state_key]
+            prev_series = (df_items_show.get("Descrição do Item", "").astype(str) == str(selected_item_name))
+            df_items_show["🔍 Detalhes"] = prev_series
+
+            st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
+            editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
+
+            edited = st.data_editor(
+                df_items_show,
                 use_container_width=True,
-                height=360
+                height=420,
+                disabled=[c for c in df_items_show.columns if c != "🔍 Detalhes"],
+                column_config={
+                    "🔍 Detalhes": st.column_config.CheckboxColumn(
+                        help="Mostrar detalhes deste item logo abaixo",
+                        default=False
+                    )
+                },
+                key=editor_key
             )
-            st.caption("Abra o **🔎 Detalhes** abaixo de cada item para ver a relação completa (somente guias glosadas).")
+
+            if "Descrição do Item" not in edited.columns:
+                new_selected_item = None
+            else:
+                curr_series = edited["🔍 Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
+                turned_on  = (curr_series & ~prev_series)
+                if turned_on.any():
+                    idx = turned_on[turned_on].index[-1]
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                elif not curr_series.any():
+                    new_selected_item = None
+                elif curr_series.sum() == 1:
+                    idx = curr_series.idxmax()
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                else:
+                    candidates = curr_series[curr_series].index.tolist()
+                    prev_idx = prev_series[prev_series].index.tolist()
+                    pick = [i for i in candidates if i not in prev_idx]
+                    idx = (pick[-1] if pick else candidates[-1])
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+
+            if new_selected_item != selected_item_name:
+                st.session_state[sel_state_key] = new_selected_item
+                st.session_state[ver_key] += 1
+                st.rerun()
+
+            selected_item_name = st.session_state[sel_state_key]
+
+            # ============ BUSCA POR Nº AMHPTISS ============
+            amhp_col = colmap.get("amhptiss")
+            if amhp_col and amhp_col in df_g.columns:
+                @st.cache_data
+                def normalize_and_index(df, col):
+                    df2 = df.copy()
+                    df2["_amhp_digits"] = (
+                        df2[col].astype(str).str.replace(r"[^\d]", "", regex=True).str.strip()
+                    )
+                    index = {}
+                    for i, v in df2["_amhp_digits"].items():
+                        if v not in index:
+                            index[v] = []
+                        index[v].append(i)
+                    return df2, index
+                df_g, amhp_index = normalize_and_index(df_g, amhp_col)
+
+            st.session_state.setdefault("amhp_query", "")
+            st.session_state.setdefault("amhp_result", None)
+
+            st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
+            st.markdown("---")
+
+            if not amhp_col or amhp_col not in df_g.columns:
+                st.info("Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados.")
+            else:
+                col1, col2 = st.columns([0.65, 0.35])
+                with col1:
+                    numero_input = st.text_input(
+                        "Informe o Nº AMHPTISS",
+                        value=st.session_state.amhp_query,
+                        placeholder="Ex.: 61916098"
+                    )
+                    cbt1, cbt2 = st.columns(2)
+                    with cbt1:
+                        clique_buscar = st.button("🔍 Buscar", key="btn_buscar_amhp")
+                    with cbt2:
+                        clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhp")
+                with col2:
+                    ignorar_filtros = st.checkbox(
+                        "Ignorar filtros de Convênio/Mês",
+                        False,
+                        help="Busca no dataset completo, ignorando filtros ativos."
+                    )
+
+                def digits(s): return re.sub(r"\D+", "", str(s or ""))
+
+
+                if clique_fechar:
+                    st.session_state.amhp_query = ""
+                    st.session_state.amhp_result = None
+                    st.rerun()   # 🔄 não interrompe a página, apenas recarrega
+
+
+                
+                if clique_buscar:
+                    num = digits(numero_input)
+                    if not num:
+                        st.warning("Digite um Nº AMHPTISS válido.")
+                    else:
+                        st.session_state.amhp_query = num
+                        base = df_g if ignorar_filtros else df_view
+                
+                        if num in amhp_index:
+                            idx = amhp_index[num]
+                
+                            # ✅ mantém só os índices existentes no DF base (evita KeyError)
+                            #    Obs.: a ordem é preservada como no índice da guia (idx)
+                            idx_validos = [i for i in idx if i in base.index]
+                
+                            if idx_validos:
+                                result = base.loc[idx_validos]
+                            else:
+                                # A guia existe no dataset completo, mas saiu com os filtros atuais
+                                result = pd.DataFrame()
+                        else:
+                            # Nº AMHPTISS inexistente no dataset
+                            result = pd.DataFrame()
+                
+                        # ✅ SALVA o resultado no estado para ser lido abaixo
+                        st.session_state.amhp_result = result
+
+
+
+                result = st.session_state.amhp_result
+                numero_alvo = st.session_state.amhp_query
+
+                if result is not None:
+                    st.markdown("---")
+                    st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
+
+                    if result.empty:
+                        msg = "" if ignorar_filtros else " com os filtros atuais"
+                        st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg}.")
+                    else:
+                        motivo_col = colmap.get("motivo")
+                        if motivo_col and motivo_col in result.columns:
+                            result = result.assign(
+                                **{motivo_col: result[motivo_col].astype(str).str.replace(r"[^\d]", "", regex=True).str.strip()}
+                            )
+
+                        col_vc = colmap.get("valor_cobrado")
+                        col_vg = colmap.get("valor_glosa")
+                        qtd_cobrados = len(result)
+                        total_cobrado = float(pd.to_numeric(result[col_vc], errors="coerce").fillna(0).sum()) if col_vc in result else 0.0
+                        total_glosado = float(pd.to_numeric(result[col_vg], errors="coerce").abs().fillna(0).sum()) if col_vg in result else 0.0
+                        qtd_glosados = int((result["_is_glosa"] == True).sum()) if "_is_glosa" in result.columns else 0
+
+                        st.markdown("### 📌 Resumo da guia")
+                        st.write(f"**Total Cobrado:** {f_currency(total_cobrado)}")
+                        st.write(f"**Total Glosado:** {f_currency(total_glosado)}")
+                        st.write(f"**Itens cobrados:** {qtd_cobrados}")
+                        st.write(f"**Itens glosados:** {qtd_glosados}")
+                        st.markdown("---")
+
+                        ren = {}
+                        if col_vc and col_vc in result.columns: ren[col_vc] = "Valor Cobrado (R$)"
+                        if col_vg and col_vg in result.columns: ren[col_vg] = "Valor Glosado (R$)"
+                        col_vr = colmap.get("valor_recursado")
+                        if col_vr and col_vr in result.columns: ren[col_vr] = "Valor Recursado (R$)"
+                        result_show = result.rename(columns=ren)
+
+                        exibir_cols = [
+                            amhp_col,
+                            colmap.get("convenio"),
+                            colmap.get("prestador"),
+                            colmap.get("descricao"),
+                            motivo_col,
+                            colmap.get("desc_motivo"),
+                            colmap.get("tipo_glosa"),
+                            colmap.get("data_realizado"),
+                            colmap.get("data_pagamento"),
+                            colmap.get("cobranca"),
+                            "Valor Cobrado (R$)",
+                            "Valor Glosado (R$)",
+                            "Valor Recursado (R$)",
+                        ]
+                        exibir_cols = [c for c in exibir_cols if c in result_show.columns]
+
+                        st.dataframe(
+                            apply_currency(result_show[exibir_cols], ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
+                            use_container_width=True,
+                            height=420
+                        )
+
+                        st.download_button(
+                            "⬇️ Baixar resultado (CSV)",
+                            result_show[exibir_cols].to_csv(index=False).encode("utf-8"),
+                            file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
+                            mime="text/csv"
+                        )
+
+                        if not ignorar_filtros:
+                            st.caption("Dica: se algum item não aparecer, marque **“Ignorar filtros de Convênio/Mês”**.")
+
+        # === DETALHES DO ITEM SELECIONADO ===
+        if selected_item_name:
+            st.markdown("---")
+            st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
+
+            
+            if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
+                st.session_state[sel_state_key] = None
+                st.session_state[ver_key] += 1
+                st.rerun()   # 🔄 não afeta outros blocos
+
 
             desc_col_map = colmap.get("descricao")
             if not desc_col_map or desc_col_map not in df_view.columns:
                 st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
             else:
-                for i, row in df_items_top.reset_index(drop=True).iterrows():
-                    item_nome = row.get("Descrição do Item", "")
-                    with st.expander(f"🔎 Detalhes — {item_nome}"):
-                        # Apenas guias glosadas daquele item
-                        df_item = df_view[
-                            (df_view[desc_col_map].astype(str) == str(item_nome)) &
-                            (df_view["_is_glosa"] == True)
-                        ].copy()
+                sel_name_str = str(selected_item_name)
+                mask_item = (df_view[desc_col_map].astype(str) == sel_name_str)
+                mask_glosa = (mask_item & (df_view["_is_glosa"] == True)) if "_is_glosa" in df_view.columns else mask_item
 
-                        if df_item.empty:
-                            st.info(
-                                "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
-                                "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
-                            )
-                            continue
+                amhp_col2 = colmap.get("amhptiss")
+                if not amhp_col2:
+                    for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
+                        if cand in df_view.columns:
+                            amhp_col2 = cand
+                            break
 
-                        # Colunas relevantes
-                        amhp_col2 = colmap.get("amhptiss")
-                        if not amhp_col2:
-                            for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
-                                if cand in df_item.columns:
-                                    amhp_col2 = cand
-                                    break
+                possiveis = [
+                    amhp_col2,
+                    colmap.get("convenio"),
+                    colmap.get("prestador"),
+                    colmap.get("data_pagamento"),
+                    colmap.get("data_realizado"),
+                    colmap.get("motivo"),
+                    colmap.get("desc_motivo"),
+                    colmap.get("cobranca"),
+                    colmap.get("valor_cobrado"),
+                    colmap.get("valor_glosa"),
+                    colmap.get("valor_recursado"),
+                ]
+                show_cols = [c for c in possiveis if c and c in df_view.columns]
 
-                        possiveis = [
-                            amhp_col2,
-                            colmap.get("convenio"),
-                            colmap.get("prestador"),
-                            colmap.get("data_pagamento"),
-                            colmap.get("data_realizado"),
-                            colmap.get("motivo"),
-                            colmap.get("desc_motivo"),
+                df_item = df_view.loc[mask_glosa, show_cols]
 
-                            # NOVO: status Cobrança
-                            colmap.get("cobranca"),
+                vc = colmap.get("valor_cobrado")
+                vg = colmap.get("valor_glosa")
+                vr = colmap.get("valor_recursado")
 
-                            colmap.get("valor_cobrado"),
-                            colmap.get("valor_glosa"),
-                            colmap.get("valor_recursado"),
-                        ]
-                        show_cols = [c for c in possiveis if c and c in df_item.columns]
+                cols_min = [c for c in [vc, vg] if c and c in df_view.columns]
+                df_item_all = df_view.loc[mask_item, cols_min] if cols_min else df_view.loc[mask_item, []]
 
-                        total_reg = len(df_item)
-                        total_cobrado_item = 0.0
-                        if colmap.get("valor_cobrado") in df_item.columns:
-                            total_cobrado_item = pd.to_numeric(df_item[colmap["valor_cobrado"]], errors="coerce").fillna(0).sum()
-                        total_glosa_item = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-                        st.write(
-                            f"**Registros (glosados):** {total_reg}  •  "
-                            f"**Cobrado (lista):** {f_currency(total_cobrado_item)}  •  "
-                            f"**Glosa (lista):** {f_currency(total_glosa_item)}"
-                        )
+                qtd_itens_cobrados = int(mask_item.sum())
+                total_cobrado = float(df_item_all[vc].sum()) if vc in df_item_all.columns else 0.0
 
-                        money_cols_fmt = []
-                        if colmap.get("valor_cobrado") and (colmap["valor_cobrado"] in show_cols):
-                            money_cols_fmt.append(colmap["valor_cobrado"])
-                        if colmap.get("valor_glosa") and (colmap["valor_glosa"] in show_cols):
-                            money_cols_fmt.append(colmap["valor_glosa"])
-                        if colmap.get("valor_recursado") and (colmap["valor_recursado"] in show_cols):
-                            money_cols_fmt.append(colmap["valor_recursado"])
+                if "_valor_glosa_abs" in df_view.columns:
+                    total_glosado = float(df_view.loc[mask_glosa, "_valor_glosa_abs"].sum())
+                elif vg and vg in df_view.columns:
+                    total_glosado = float(df_view.loc[mask_glosa, vg].abs().sum())
+                else:
+                    total_glosado = 0.0
 
-                        if "_valor_glosa_abs" in df_item.columns:
-                            df_item = df_item.sort_values("_valor_glosa_abs", ascending=False)
+                st.markdown("### 📌 Resumo do item")
+                st.write(f"**Itens cobrados:** {qtd_itens_cobrados}")
+                st.write(f"**Total cobrado:** {f_currency(total_cobrado)}")
+                st.write(f"**Total glosado:** {f_currency(total_glosado)}")
+                st.markdown("---")
 
-                        if show_cols:
-                            st.dataframe(
-                                apply_currency(df_item[show_cols], money_cols_fmt),
-                                use_container_width=True,
-                                height=420,
-                            )
-                        else:
-                            st.dataframe(df_item, use_container_width=True, height=420)
+                if "_valor_glosa_abs" in df_view.columns:
+                    order_series = df_view.loc[mask_glosa, "_valor_glosa_abs"]
+                elif vg and vg in df_view.columns:
+                    order_series = df_view.loc[mask_glosa, vg].abs()
+                else:
+                    order_series = None
 
-                        base_cols = show_cols if show_cols else df_item.columns.tolist()
-                        st.download_button(
-                            "⬇️ Baixar relação (CSV) — apenas guias com glosa",
-                            data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
-                            file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_nome)[:40]}.csv",
-                            mime="text/csv",
-                        )
+                if order_series is not None and not order_series.empty:
+                    df_item = df_item.loc[order_series.sort_values(ascending=False).index]
 
-        # Convênios (SEM gráficos)
-        st.markdown("### 🏥 Convênios com maior valor glosado")
-        by_conv = analytics["by_convenio"] if analytics else pd.DataFrame()
-        if by_conv.empty:
-            st.info("Coluna de 'Convênio' não encontrada.")
-        else:
-            by_conv_top = by_conv.head(20)
-            st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
+                money_cols_fmt = [c for c in [vc, vg, vr] if c in df_item.columns]
 
-        # Export análise XLSX (glosas)
+                if not df_item.empty:
+                    st.dataframe(
+                        apply_currency(df_item, money_cols_fmt),
+                        use_container_width=True,
+                        height=420,
+                    )
+                else:
+                    st.info(
+                        "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
+                        "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
+                    )
+
+                base_cols = df_item.columns.tolist()
+                st.download_button(
+                    "⬇️ Baixar relação (CSV) — apenas guias com glosa",
+                    data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                    file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', selected_item_name)[:40]}.csv",
+                    mime="text/csv",
+                )
+
+        # Export análise XLSX (glosas) — mensal somando Valor Cobrado (Valor Original)
         st.markdown("---")
         st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
         from io import BytesIO
@@ -1569,15 +1730,10 @@ with tab_glosas:
             has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
             if has_pagto:
                 base_m = df_view[df_view["_is_glosa"] == True].copy()
-                if (colmap.get("valor_cobrado") in base_m.columns) and (colmap["valor_cobrado"] is not None):
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                           Valor_Cobrado=(colmap["valor_cobrado"], "sum")))
-                else:
-                    mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
-                                      .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
-                                           Valor_Cobrado=("_valor_glosa_abs","size")))
-                mensal = mensal.sort_values("_pagto_ym")
+                mensal = (base_m.groupby(["_pagto_ym","_pagto_mes_br"], as_index=False)
+                                  .agg(Valor_Glosado=("_valor_glosa_abs","sum"),
+                                       Valor_Cobrado=(colmap["valor_cobrado"], "sum"))
+                         ).sort_values("_pagto_ym")
                 mensal.rename(columns={"_pagto_ym":"YYYY-MM","_pagto_mes_br":"Mês/Ano"}, inplace=True)
                 mensal.to_excel(wr, index=False, sheet_name="Mensal_Pagamento")
 
@@ -1597,10 +1753,7 @@ with tab_glosas:
                 colmap.get("convenio"), colmap.get("prestador"),
                 colmap.get("descricao"), colmap.get("tipo_glosa"),
                 colmap.get("motivo"), colmap.get("desc_motivo"),
-
-                # NOVO: incluir "Cobrança" no export bruto selecionado
                 colmap.get("cobranca"),
-
                 colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")
             ] if c and c in df_view.columns]
             raw = df_view[col_export].copy() if col_export else pd.DataFrame()
@@ -1627,3 +1780,4 @@ with tab_glosas:
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
+
