@@ -1502,15 +1502,17 @@ with tab_glosas:
                         if num in amhp_index:
                             idx = amhp_index[num]
                         
-                            # 🛠 evita KeyError — mantém só os índices que realmente existem no df filtrado
+                            # Corrige erro: só mantém os índices que existem no DF filtrado
                             idx_validos = [i for i in idx if i in base.index]
                         
-                            if idx_validos:
+                            if len(idx_validos) > 0:
                                 result = base.loc[idx_validos]
                             else:
-                                result = pd.DataFrame()   # nenhum item dessa guia dentro dos filtros
+                                # A guia existe, mas não aparece com os filtros atuais
+                                result = pd.DataFrame()
                         else:
                             result = pd.DataFrame()
+
 
                 result = st.session_state.amhp_result
                 numero_alvo = st.session_state.amhp_query
