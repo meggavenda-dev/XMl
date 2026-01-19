@@ -1413,7 +1413,7 @@ with tab_glosas:
             # Top 20 — Motivos de glosa por maior valor glosado
             # (um ÚNICO quadro: visíveis ~5 linhas, demais via rolagem)
             # ================================
-            st.markdown("### Top 20 — Motivos de glosa por **maior valor glosado**")
+            st.markdown("### 🧾 Top 20 — Motivos de glosa por **maior valor glosado**")
             
             mot_df = analytics["top_motivos"] if analytics else pd.DataFrame()
             if mot_df.empty:
