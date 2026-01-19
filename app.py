@@ -1438,6 +1438,9 @@ with tab_glosas:
             # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com coluna "Cobrança")
             # (POSICIONADO entre "Top Itens" e "Detalhes")
             # ==========================================
+            st.markdown("---")
+
+            
             st.markdown("### 🔎 Buscar por **Nº AMHPTISS** (tudo que foi cobrado)")
             amhp_col = colmap.get("amhptiss")
             
