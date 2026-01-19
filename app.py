@@ -1434,77 +1434,161 @@ with tab_glosas:
             selected_item_name = st.session_state[sel_state_key]
                                 
             
-            # ==========================================
-            # 🔎 Buscar por Nº AMHPTISS → trazer TUDO que foi cobrado (com coluna "Cobrança")
-            # (POSICIONADO entre "Top Itens" e "Detalhes")
-            # ==========================================
-            st.markdown("---")
-
+           
+            # ==========================================================
+            # 🔎 Buscar por Nº AMHPTISS — ORGANIZADO E MAIS RÁPIDO
+            # ==========================================================
             
-            st.markdown("### 🔎 Buscar por **Nº AMHPTISS** (tudo que foi cobrado)")
+            st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
+            st.markdown("---")
+            
             amhp_col = colmap.get("amhptiss")
             
-            # Estados persistentes para exibição/fechamento
-            if "amhp_result_df" not in st.session_state:
-                st.session_state.amhp_result_df = None  # DataFrame do último resultado
-            if "amhp_result_num" not in st.session_state:
-                st.session_state.amhp_result_num = None  # Dígitos do último AMHPTISS
+            # Criar estado persistente se ainda não existir
+            st.session_state.setdefault("amhp_result_df", None)
+            st.session_state.setdefault("amhp_result_num", "")
             
             if not amhp_col or amhp_col not in df_g.columns:
-                st.info(
-                    "Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados. "
-                    "Verifique se há uma coluna como *AMHPTISS*, *AMHP TISS*, *Nº AMHPTISS*, etc."
-                )
+                st.info("Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados.")
             else:
-                # Linha do input (coluna ampla)
-                c1, c2 = st.columns([0.65, 0.35])
             
-                with c1:
-                    amhptiss_busca = st.text_input(
-                        "Informe o Nº AMHPTISS",
-                        value=st.session_state.amhp_result_num or "",
-                        placeholder="Ex.: 61916098",
-                        key="amhptiss_lookup",
+                with st.container():
+            
+                    # Campo + botões lado a lado
+                    c1, c2 = st.columns([0.65, 0.35])
+            
+                    with c1:
+                        numero_input = st.text_input(
+                            "Informe o Nº AMHPTISS",
+                            value=st.session_state.amhp_result_num,
+                            key="amhp_input",
+                            placeholder="Ex.: 61916098"
+                        )
+            
+                        b1, b2 = st.columns([0.5, 0.5])
+                        with b1:
+                            clique_buscar = st.button("🔎 Buscar", key="btn_buscar_amhptiss")
+                        with b2:
+                            clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhptiss")
+            
+                    with c2:
+                        ignorar_filtros = st.checkbox(
+                            "Ignorar filtros de Convênio/Mês",
+                            False,
+                            key="chk_amhp_ignorar",
+                            help="Busca no dataset completo, ignorando filtros ativos."
+                        )
+            
+                    # Normalizar dígitos
+                    def digits(s):
+                        return re.sub(r"\D+", "", str(s or ""))
+            
+                    # FECHAR — instantâneo
+                    if clique_fechar:
+                        st.session_state.amhp_result_df = None
+                        st.session_state.amhp_result_num = ""
+                        # Sem st.rerun() — rápido
+                        
+            
+                    # BUSCAR
+                    if clique_buscar:
+                        num = digits(numero_input)
+                        if not num:
+                            st.warning("Digite um Nº AMHPTISS válido.")
+                        else:
+                            base = df_g if ignorar_filtros else df_view
+                            tmp = base.copy()
+                            tmp["_digits"] = tmp[amhp_col].astype(str).map(digits)
+            
+                            result = tmp[tmp["_digits"] == num].copy()
+            
+                            st.session_state.amhp_result_df = result
+                            st.session_state.amhp_result_num = num
+            
+            
+                # ==========================================================
+                # RESULTADOS DA BUSCA
+                # ==========================================================
+            
+                if st.session_state.amhp_result_df is not None:
+            
+                    result = st.session_state.amhp_result_df.copy()
+                    numero_alvo = st.session_state.amhp_result_num
+            
+                    st.markdown("---")
+                    st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
+            
+                    # Normalizar motivo (sem vírgula)
+                    motivo_col = colmap.get("motivo")
+                    if motivo_col and motivo_col in result.columns:
+                        result[motivo_col] = (
+                            result[motivo_col]
+                            .astype(str)
+                            .str.replace(r"[^\d]", "", regex=True)
+                            .str.strip()
+                        )
+            
+                    # ===========================
+                    # 📌 RESUMO DA GUIA
+                    # ===========================
+                    qtd_cobrados = len(result)
+                    qtd_glosados = int(result["_is_glosa"].sum()) if "_is_glosa" in result else 0
+            
+                    # totais
+                    col_valor_c = colmap["valor_cobrado"]
+                    total_cob = float(pd.to_numeric(result[col_valor_c], errors="coerce").fillna(0).sum()) if col_valor_c in result else 0
+            
+                    col_valor_g = colmap["valor_glosa"]
+                    total_glo = float(
+                        pd.to_numeric(result[col_valor_g], errors="coerce").abs().fillna(0).sum()
+                    ) if col_valor_g in result else 0
+            
+                    st.markdown("### 📌 Resumo da guia")
+                    st.write(f"**Total Cobrado:** {f_currency(total_cob)}")
+                    st.write(f"**Total Glosado:** {f_currency(total_glo)}")
+                    st.write(f"**Itens cobrados:** {qtd_cobrados}")
+                    st.write(f"**Itens glosados:** {qtd_glosados}")
+                    st.markdown("---")
+            
+                    # Renomear colunas
+                    ren = {}
+                    if col_valor_c in result.columns: ren[col_valor_c] = "Valor Cobrado (R$)"
+                    if col_valor_g in result.columns: ren[col_valor_g] = "Valor Glosado (R$)"
+                    col_valor_rec = colmap.get("valor_recursado")
+                    if col_valor_rec and col_valor_rec in result.columns: ren[col_valor_rec] = "Valor Recursado (R$)"
+                    result = result.rename(columns=ren)
+            
+                    # Exibir tabela
+                    exibir_cols = [
+                        amhp_col,
+                        colmap.get("convenio"),
+                        colmap.get("prestador"),
+                        colmap.get("descricao"),
+                        motivo_col,
+                        colmap.get("desc_motivo"),
+                        colmap.get("tipo_glosa"),
+                        colmap.get("data_realizado"),
+                        colmap.get("data_pagamento"),
+                        colmap.get("cobranca"),
+                        "Valor Cobrado (R$)",
+                        "Valor Glosado (R$)",
+                        "Valor Recursado (R$)",
+                    ]
+                    exibir_cols = [c for c in exibir_cols if c in result.columns]
+            
+                    st.dataframe(
+                        apply_currency(result[exibir_cols], ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
+                        use_container_width=True,
+                        height=420
                     )
             
-                    # ⬇️ Botões LOGO ABAIXO do campo de texto, na mesma coluna
-                    bcol1, bcol2 = st.columns([0.5, 0.5])
-                    with bcol1:
-                        buscar_click = st.button("🔎 Buscar", key="btn_busca_amhptiss_tudo")
-                    with bcol2:
-                        fechar_click = st.button("❌ Fechar resultados", key="btn_fechar_amhptiss_result")
-            
-                with c2:
-                    ignorar_filtros = st.checkbox(
-                        "Ignorar filtros de Convênio/Mês",
-                        value=False,
-                        help="Busca no dataset inteiro (não apenas no recorte atual).",
-                        key="amhp_ignorar_filtros"
+                    st.download_button(
+                        "⬇️ Baixar resultado (CSV)",
+                        result[exibir_cols].to_csv(index=False).encode("utf-8"),
+                        file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
+                        mime="text/csv"
                     )
-            
-                def _digits(s: str) -> str:
-                    return re.sub(r"\D+", "", str(s or ""))
-            
-                # Fechar resultados: limpa o estado
-                if fechar_click:
-                    st.session_state.amhp_result_df = None
-                    st.session_state.amhp_result_num = None
-            
-                # Buscar: atualiza o estado com o novo resultado
-                if buscar_click:
-                    numero_alvo = _digits(amhptiss_busca)
-                    if not numero_alvo:
-                        st.warning("Informe um número AMHPTISS válido (somente dígitos).")
-                    else:
-                        df_base_busca = df_g if ignorar_filtros else df_view
-                        df_tmp = df_base_busca.copy()
-                        df_tmp["_amhp_digits"] = df_tmp[amhp_col].astype(str).map(_digits)
-            
-                        result = df_tmp[df_tmp["_amhp_digits"] == numero_alvo].copy()
-            
-                        # Guarda no estado para exibição persistente
-                        st.session_state.amhp_result_df = result
-                        st.session_state.amhp_result_num = numero_alvo
+
             
                 
                 # Exibição dos resultados (se houver no estado)
