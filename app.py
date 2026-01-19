@@ -1672,6 +1672,10 @@ with tab_glosas:
         
         # === DETALHES DO ITEM SELECIONADO (recolocado após a busca AMHPTISS) ===
         if selected_item_name:
+            
+            # Linha separadora acima do título
+            st.markdown("---")
+
             st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
 
             
