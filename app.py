@@ -1410,12 +1410,12 @@ with tab_glosas:
             mot = analytics["top_motivos"].head(20)
             st.dataframe(apply_currency(mot, ["Valor Glosado (R$)"]), use_container_width=True, height=360)
 
-        st.markdown("### 🧷 Tipo de glosa")
-        by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
-        if by_tipo.empty:
-            st.info("Coluna de 'Tipo de Glosa' não encontrada.")
-        else:
-            st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
+        #st.markdown("### 🧷 Tipo de glosa")
+        #by_tipo = analytics["by_tipo"] if analytics else pd.DataFrame()
+        #if by_tipo.empty:
+            #st.info("Coluna de 'Tipo de Glosa' não encontrada.")
+        #else:
+            #st.dataframe(apply_currency(by_tipo, ["Valor Glosado (R$)"]), use_container_width=True, height=280)
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
