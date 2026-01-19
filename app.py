@@ -26,7 +26,7 @@ import streamlit as st
 # =========================================================
 # Configuração da página (UI)
 # =========================================================
-st.set_page_config(page_title="TISS • Conciliação &amp; Analytics", layout="wide")
+st.set_page_config(page_title="TISS • Conciliação & Analytics", layout="wide")
 st.title("TISS — Itens por Guia (XML) + Conciliação com Demonstrativo + Analytics")
 st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado (AMHP), gera rankings e analytics — sem editor de XML. Auditoria mantida no código, porém desativada.")
 
@@ -35,12 +35,6 @@ st.caption("Lê XML TISS (Consulta / SADT), concilia com Demonstrativo itemizado
 # =========================================================
 ANS_NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 DEC_ZERO = Decimal('0')
-
-# PERF: tentar backend de string mais eficiente (não altera lógica; ignora se não houver pyarrow)
-try:
-    pd.options.mode.string_storage = "pyarrow"  # reduz RAM em colunas string
-except Exception:
-    pass
 
 def dec(txt: Optional[str]) -> Decimal:
     if txt is None:
@@ -125,11 +119,11 @@ if "demo_mappings" not in st.session_state:
     st.session_state["demo_mappings"] = load_demo_mappings()
 
 # Cache
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)  # PERF: limitar e expirar cache (não muda lógica)
+@st.cache_data(show_spinner=False)
 def _cached_read_excel(file, sheet_name=0) -> pd.DataFrame:
     return pd.read_excel(file, sheet_name=sheet_name, engine="openpyxl")
 
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=128)  # PERF: idem
+@st.cache_data(show_spinner=False)
 def _cached_xml_bytes(b: bytes) -> List[Dict]:
     from io import BytesIO
     return parse_itens_tiss_xml(BytesIO(b))
@@ -148,9 +142,7 @@ def _get_numero_lote(root: ET.Element) -> str:
     return ""
 
 def _itens_consulta(guia: ET.Element) -> List[Dict]:
-    # PERF: micro cache do find do elemento (evita lookups repetidos)
-    find = guia.find
-    proc = find('.//ans:procedimento', ANS_NS)
+    proc = guia.find('.//ans:procedimento', ANS_NS)
     codigo_tabela = tx(proc.find('ans:codigoTabela', ANS_NS)) if proc is not None else ''
     codigo_proc   = tx(proc.find('ans:codigoProcedimento', ANS_NS)) if proc is not None else ''
     descricao     = tx(proc.find('ans:descricaoProcedimento', ANS_NS)) if proc is not None else ''
@@ -168,9 +160,7 @@ def _itens_consulta(guia: ET.Element) -> List[Dict]:
 
 def _itens_sadt(guia: ET.Element) -> List[Dict]:
     out = []
-    # PERF: micro cache do find
-    guia_findall = guia.findall
-    for it in guia_findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
+    for it in guia.findall('.//ans:procedimentosExecutados/ans:procedimentoExecutado', ANS_NS):
         proc = it.find('ans:procedimento', ANS_NS)
         codigo_tabela = tx(proc.find('ans:codigoTabela', ANS_NS)) if proc is not None else ''
         codigo_proc   = tx(proc.find('ans:codigoProcedimento', ANS_NS)) if proc is not None else ''
@@ -190,7 +180,7 @@ def _itens_sadt(guia: ET.Element) -> List[Dict]:
             'valor_unitario': vuni if vuni > DEC_ZERO else vtot,
             'valor_total': vtot,
         })
-    for desp in guia_findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
+    for desp in guia.findall('.//ans:outrasDespesas/ans:despesa', ANS_NS):
         ident = tx(desp.find('ans:identificadorDespesa', ANS_NS))
         sv = desp.find('ans:servicosExecutados', ANS_NS)
         codigo_tabela = tx(sv.find('ans:codigoTabela', ANS_NS)) if sv is not None else ''
@@ -283,7 +273,6 @@ def parse_itens_tiss_xml(source: Union[str, Path, IO[bytes]]) -> List[Dict]:
 
     return out
 
-
 # =========================================================
 # PARTE 3 — Demonstrativo (.xlsx)
 # =========================================================
@@ -341,9 +330,7 @@ def ler_demo_amhp_fixado(path, strip_zeros_codes: bool = False) -> pd.DataFrame:
 
     for c in ["valor_apresentado", "valor_pago", "valor_glosa", "quantidade_apresentada"]:
         if c in df.columns:
-            # PERF: converter com downcast para reduzir RAM (sem alterar valores)
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.'), errors="coerce").fillna(0)
-            df[c] = pd.to_numeric(df[c], downcast="float")
 
     df["chave_demo"] = df["numeroGuiaPrestador"].astype(str) + "__" + df["codigo_procedimento_norm"].astype(str)
 
@@ -385,29 +372,25 @@ def _apply_manual_map(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
         if not c or c == "(não usar)" or c not in df.columns:
             return None
         return df[c]
-    
-        out = pd.DataFrame({
-            "numero_lote": pick("lote"),
-            "competencia": pick("competencia"),
-            "numeroGuiaPrestador": pick("guia_prest"),
-            "numeroGuiaOperadora": pick("guia_oper"),
-            "codigo_procedimento": pick("cod_proc"),
-            "descricao_procedimento": pick("desc_proc"),
-            "quantidade_apresentada": pd.to_numeric(pick("qtd_apres"), errors="coerce") if pick("qtd_apres") is not None else 0,
-            "quantidade_paga": pd.to_numeric(pick("qtd_paga"), errors="coerce") if pick("qtd_paga") is not None else 0,
-            "valor_apresentado": pd.to_numeric(pick("val_apres"), errors="coerce") if pick("val_apres") is not None else 0,
-            "valor_glosa": pd.to_numeric(pick("val_glosa"), errors="coerce") if pick("val_glosa") is not None else 0,
-            "valor_pago": pd.to_numeric(pick("val_pago"), errors="coerce") if pick("val_pago") is not None else 0,
-            "motivo_glosa_codigo": pick("motivo_cod"),
-            "motivo_glosa_descricao": pick("motivo_desc"),
-        })
-
+    out = pd.DataFrame({
+        "numero_lote": pick("lote"),
+        "competencia": pick("competencia"),
+        "numeroGuiaPrestador": pick("guia_prest"),
+        "numeroGuiaOperadora": pick("guia_oper"),
+        "codigo_procedimento": pick("cod_proc"),
+        "descricao_procedimento": pick("desc_proc"),
+        "quantidade_apresentada": pd.to_numeric(pick("qtd_apres"), errors="coerce") if pick("qtd_apres") is not None else 0,
+        "quantidade_paga": pd.to_numeric(pick("qtd_paga"), errors="coerce") if pick("qtd_paga") is not None else 0,
+        "valor_apresentado": pd.to_numeric(pick("val_apres"), errors="coerce") if pick("val_apres") is not None else 0,
+        "valor_glosa": pd.to_numeric(pick("val_glosa"), errors="coerce") if pick("val_glosa") is not None else 0,
+        "valor_pago": pd.to_numeric(pick("val_pago"), errors="coerce") if pick("val_pago") is not None else 0,
+        "motivo_glosa_codigo": pick("motivo_cod"),
+        "motivo_glosa_descricao": pick("motivo_desc"),
+    })
     for c in ["numero_lote","numeroGuiaPrestador","numeroGuiaOperadora","codigo_procedimento"]:
         out[c] = out[c].astype(str).str.strip()
     for c in ["valor_apresentado","valor_glosa","valor_pago","quantidade_apresentada","quantidade_paga"]:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
-        # PERF: downcast para reduzir memória
-        out[c] = pd.to_numeric(out[c], downcast="float")
     out["codigo_procedimento_norm"] = out["codigo_procedimento"].map(lambda s: normalize_code(s))
     out["chave_prest"] = out["numeroGuiaPrestador"] + "__" + out["codigo_procedimento_norm"]
     out["chave_oper"]  = out["numeroGuiaOperadora"] + "__" + out["codigo_procedimento_norm"]
@@ -511,8 +494,7 @@ def build_demo_df(demo_files, strip_zeros_codes=False) -> pd.DataFrame:
             else:
                 st.error(f"Não foi possível mapear o demonstrativo '{fname}'.")
     if parts:
-        # PERF: evitar cópia na concat (não muda resultado)
-        return pd.concat(parts, ignore_index=True, copy=False)
+        return pd.concat(parts, ignore_index=True)
     return pd.DataFrame()
 
 
@@ -539,9 +521,6 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
     for c in ['quantidade', 'valor_unitario', 'valor_total']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
-            # PERF: reduzir precisão para economizar RAM sem mudar lógica
-            df[c] = pd.to_numeric(df[c], downcast='float')
-
     df['codigo_procedimento_norm'] = df['codigo_procedimento'].astype(str).map(
         lambda s: normalize_code(s, strip_zeros=strip_zeros_codes)
     )
@@ -552,13 +531,6 @@ def build_xml_df(xml_files, strip_zeros_codes: bool = False) -> pd.DataFrame:
         df['numeroGuiaOperadora'].fillna('').astype(str).str.strip()
         + '__' + df['codigo_procedimento_norm'].fillna('').astype(str).str.strip()
     )
-
-    # PERF: tipos mais leves para chaves
-    try:
-        df['chave_prest'] = df['chave_prest'].astype('category')
-        df['chave_oper']  = df['chave_oper'].astype('category')
-    except Exception:
-        pass
 
     return df
 
@@ -591,70 +563,39 @@ def conciliar_itens(
     fallback_por_descricao: bool = False,
 ) -> Dict[str, pd.DataFrame]:
 
-    # PERF: garantir dtypes leves nas chaves
-    for k in ("chave_prest", "chave_oper"):
-        if k in df_xml.columns:
-            try: df_xml[k] = df_xml[k].astype('category')
-            except Exception: pass
-    if "chave_demo" in df_demo.columns:
-        try: df_demo["chave_demo"] = df_demo["chave_demo"].astype('category')
-        except Exception: pass
-
-    m1 = df_xml.merge(
-        df_demo,
-        left_on="chave_prest",
-        right_on="chave_demo",
-        how="left",
-        suffixes=("_xml", "_demo"),
-        sort=False  # PERF: merge sem sort (mais rápido)
-    )
+    m1 = df_xml.merge(df_demo, left_on="chave_prest", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m1 = _alias_xml_cols(m1)
-    # já é vetorizado
     m1["matched_on"] = m1["valor_apresentado"].notna().map({True: "prestador", False: ""})
 
-    # PERF: evitar .copy() até precisar
-    restante = m1[m1["matched_on"] == ""]
+    restante = m1[m1["matched_on"] == ""].copy()
     restante = _alias_xml_cols(restante)
     cols_xml = df_xml.columns.tolist()
-
-    m2 = restante[cols_xml].merge(
-        df_demo,
-        left_on="chave_oper",
-        right_on="chave_demo",
-        how="left",
-        suffixes=("_xml", "_demo"),
-        sort=False  # PERF
-    )
+    m2 = restante[cols_xml].merge(df_demo, left_on="chave_oper", right_on="chave_demo", how="left", suffixes=("_xml", "_demo"))
     m2 = _alias_xml_cols(m2)
     m2["matched_on"] = m2["valor_apresentado"].notna().map({True: "operadora", False: ""})
 
-    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True, copy=False)
+    conc = pd.concat([m1[m1["matched_on"] != ""], m2[m2["matched_on"] != ""]], ignore_index=True)
 
     fallback_matches = pd.DataFrame()
     if fallback_por_descricao:
-        ainda_sem_match = m2[m2["matched_on"] == ""]
+        ainda_sem_match = m2[m2["matched_on"] == ""].copy()
         ainda_sem_match = _alias_xml_cols(ainda_sem_match)
         if not ainda_sem_match.empty:
-            ainda_sem_match = ainda_sem_match.copy()
-            ainda_sem_match["guia_join"] = (
-                ainda_sem_match["numeroGuiaPrestador"].astype(str).str.strip()
-                .where(ainda_sem_match["numeroGuiaPrestador"].astype(str).str.strip() != "", 
-                       ainda_sem_match["numeroGuiaOperadora"].astype(str).str.strip())
+            ainda_sem_match["guia_join"] = ainda_sem_match.apply(
+                lambda r: str(r.get("numeroGuiaPrestador", "")).strip() or str(r.get("numeroGuiaOperadora", "")).strip(), axis=1
             )
             df_demo2 = df_demo.copy()
             df_demo2["guia_join"] = df_demo2["numeroGuiaPrestador"].astype(str).str.strip()
             if "descricao_procedimento" in ainda_sem_match.columns and "descricao_procedimento" in df_demo2.columns:
                 tmp = ainda_sem_match[cols_xml + ["guia_join"]].merge(
-                    df_demo2, on=["guia_join", "descricao_procedimento"], how="left",
-                    suffixes=("_xml", "_demo"), sort=False  # PERF
+                    df_demo2, on=["guia_join", "descricao_procedimento"], how="left", suffixes=("_xml", "_demo")
                 )
                 tol = float(tolerance_valor)
-                # PERF: filtro vetorizado
                 keep = (tmp["valor_apresentado"].notna() & ((tmp["valor_total"] - tmp["valor_apresentado"]).abs() <= tol))
                 fallback_matches = tmp[keep].copy()
                 if not fallback_matches.empty:
                     fallback_matches["matched_on"] = "descricao+valor"
-                    conc = pd.concat([conc, fallback_matches], ignore_index=True, copy=False)
+                    conc = pd.concat([conc, fallback_matches], ignore_index=True)
 
     if not fallback_matches.empty:
         chaves_resolvidas = fallback_matches["chave_prest"].unique()
@@ -669,17 +610,11 @@ def conciliar_itens(
 
     if not conc.empty:
         conc = _alias_xml_cols(conc)
-        # PERF: vetorização
-        if "valor_apresentado" in conc.columns and "valor_total" in conc.columns:
-            conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
-        else:
-            conc["apresentado_diff"] = 0.0
-
-        if "valor_glosa" in conc.columns and "valor_apresentado" in conc.columns:
-            denom = conc["valor_apresentado"].replace(0, np.nan)
-            conc["glosa_pct"] = (conc["valor_glosa"] / denom).fillna(0)
-        else:
-            conc["glosa_pct"] = 0.0
+        conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
+        conc["glosa_pct"] = conc.apply(
+            lambda r: (r["valor_glosa"] / r["valor_apresentado"]) if r.get("valor_apresentado", 0) > 0 else 0.0,
+            axis=1
+        )
 
     return {"conciliacao": conc, "nao_casados": unmatch}
 
@@ -698,10 +633,11 @@ def kpis_por_competencia(df_conc: pd.DataFrame) -> pd.DataFrame:
            .agg(valor_apresentado=('valor_apresentado','sum'),
                 valor_pago=('valor_pago','sum'),
                 valor_glosa=('valor_glosa','sum')))
-    # PERF: vetorizado
-    denom = grp['valor_apresentado'].replace(0, np.nan)
-    grp['glosa_pct'] = (grp['valor_glosa'] / denom).fillna(0)
+    grp['glosa_pct'] = grp.apply(
+        lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
+    )
     return grp.sort_values('competencia')
+
 
 def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 0.0, topn: int = 20) -> Tuple[pd.DataFrame, pd.DataFrame]:
     base = df_conc.copy()
@@ -715,9 +651,7 @@ def ranking_itens_glosa(df_conc: pd.DataFrame, min_apresentado: float = 0.0, top
     grp_com_glosa = grp[grp['valor_glosa'] > 0].copy()
     if grp_com_glosa.empty:
         return pd.DataFrame(), pd.DataFrame()
-    # PERF: vetorizado
-    denom = grp_com_glosa['valor_apresentado'].replace(0, np.nan)
-    grp_com_glosa['glosa_pct'] = (grp_com_glosa['valor_glosa'] / denom * 100).fillna(0)
+    grp_com_glosa['glosa_pct'] = (grp_com_glosa['valor_glosa'] / grp_com_glosa['valor_apresentado']) * 100
     top_valor = grp_com_glosa.sort_values('valor_glosa', ascending=False).head(topn)
     top_pct = grp_com_glosa[grp_com_glosa['valor_apresentado'] >= min_apresentado].sort_values('glosa_pct', ascending=False).head(topn)
     return top_valor, top_pct
@@ -747,7 +681,7 @@ def outliers_por_procedimento(df_conc: pd.DataFrame, k: float = 1.5) -> pd.DataF
                   q1=('valor_apresentado', lambda x: x.quantile(0.25)),
                   q3=('valor_apresentado', lambda x: x.quantile(0.75))))
     stats['iqr'] = stats['q3'] - stats['q1']
-    base = base.merge(stats.reset_index(), on=['codigo_procedimento','descricao_procedimento'], how='left', sort=False)  # PERF
+    base = base.merge(stats.reset_index(), on=['codigo_procedimento','descricao_procedimento'], how='left')
     base['is_outlier'] = (base['valor_apresentado'] > base['q3'] + k*base['iqr']) | (base['valor_apresentado'] < base['q1'] - k*base['iqr'])
     return base[base['is_outlier']].copy()
 
@@ -760,12 +694,12 @@ def simulador_glosa(df_conc: pd.DataFrame, ajustes: Dict[str, float]) -> pd.Data
         mask = sim['motivo_glosa_codigo'].astype(str) == str(cod)
         sim.loc[mask, 'valor_glosa_sim'] = sim.loc[mask, 'valor_glosa'] * float(fator)
     sim['valor_glosa_sim'] = sim['valor_glosa_sim'].clip(lower=0)
-    sim['valor_pago_sim'] = (sim['valor_apresentado'] - sim['valor_glosa_sim']).clip(lower=0)
-    # PERF: vetorizado
-    denom = sim['valor_apresentado'].replace(0, np.nan)
-    sim['glosa_pct_sim'] = (sim['valor_glosa_sim'] / denom).fillna(0)
+    sim['valor_pago_sim'] = sim['valor_apresentado'] - sim['valor_glosa_sim']
+    sim['valor_pago_sim'] = sim['valor_pago_sim'].clip(lower=0)
+    sim['glosa_pct_sim'] = sim.apply(
+        lambda r: (r['valor_glosa_sim']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1
+    )
     return sim
-
 
 # =========================================================
 # PARTE 5 — Auditoria de Guias (DESATIVADA)
@@ -816,7 +750,7 @@ def _pick_col(df: pd.DataFrame, *candidates):
     return None
 
 
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)  # PERF
+@st.cache_data(show_spinner=False)
 def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     """
     Lê 1..N arquivos .xlsx de Faturas Glosadas (AMHP ou similar),
@@ -837,8 +771,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         df.columns = [str(c).strip() for c in df.columns]
         parts.append(df)
 
-    # PERF: concat sem cópia
-    df = pd.concat(parts, ignore_index=True, copy=False)
+    df = pd.concat(parts, ignore_index=True)
     cols = df.columns
 
     # ---------- Mapeamento inicial ----------
@@ -882,6 +815,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
 
+
     # ---------- "Realizado" robusto (sem "Horário") ----------
     norm_cols = [(c, re.sub(r"\s+", " ", str(c)).strip().lower()) for c in cols]
     realizado_exact = [c for c, n in norm_cols if n == "realizado"]
@@ -920,8 +854,6 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     for c in [colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-            # PERF: downcast
-            df[c] = pd.to_numeric(df[c], downcast="float")
 
     # ---------- Datas ----------
     if colmap.get("data_realizado") and colmap["data_realizado"] in df.columns:
@@ -1014,7 +946,6 @@ def build_glosas_analytics(df: pd.DataFrame, colmap: dict) -> dict:
         by_convenio=by_convenio
     )
 
-
 # =========================================================
 # PARTE 6 — Interface (Uploads, Parâmetros, Processamento, Analytics, Export)
 # =========================================================
@@ -1059,7 +990,7 @@ with tab_conc:
             st.info("Carregue um Demonstrativo válido ou conclua o mapeamento manual.")
 
     st.markdown("---")
-    if st.button("🚀 Processar Conciliação &amp; Analytics", type="primary", key="btn_conc"):
+    if st.button("🚀 Processar Conciliação & Analytics", type="primary", key="btn_conc"):
         df_xml = build_xml_df(xml_files or [], strip_zeros_codes=strip_zeros_codes)
         if df_xml.empty:
             st.warning("Nenhum item extraído do(s) XML(s). Verifique os arquivos.")
@@ -1142,9 +1073,7 @@ with tab_conc:
                          valor_glosa=('valor_glosa','sum'),
                          valor_pago=('valor_pago','sum'),
                          itens=('arquivo','count')))
-        # PERF: vetorizado
-        denom = med_rank['valor_apresentado'].replace(0, np.nan)
-        med_rank['glosa_pct'] = (med_rank['valor_glosa'] / denom).fillna(0)
+        med_rank['glosa_pct'] = med_rank.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
         st.dataframe(apply_currency(med_rank.sort_values(['glosa_pct','valor_glosa'], ascending=[False,False]),
                                     ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
 
@@ -1154,8 +1083,7 @@ with tab_conc:
                    .agg(valor_apresentado=('valor_apresentado','sum'),
                         valor_glosa=('valor_glosa','sum'),
                         valor_pago=('valor_pago','sum')))
-            denom = tab['valor_apresentado'].replace(0, np.nan)  # PERF
-            tab['glosa_pct'] = (tab['valor_glosa'] / denom).fillna(0)
+            tab['glosa_pct'] = tab.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
             st.dataframe(apply_currency(tab, ['valor_apresentado','valor_glosa','valor_pago']), use_container_width=True)
         else:
             st.info("Coluna 'Tabela' não encontrada nos itens conciliados (opcional no demonstrativo).")
@@ -1227,8 +1155,7 @@ with tab_conc:
                            valor_glosa=('valor_glosa','sum'),
                            valor_pago=('valor_pago','sum'),
                            itens=('arquivo','count')))
-            denom = proc_x['valor_apresentado'].replace(0, np.nan)  # PERF
-            proc_x['glosa_pct'] = (proc_x['valor_glosa']/denom).fillna(0)
+            proc_x['glosa_pct'] = proc_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
             proc_x.to_excel(wr, index=False, sheet_name='Procedimentos_Glosa')
 
             med_x = (conc.groupby(['medico'], dropna=False, as_index=False)
@@ -1236,8 +1163,7 @@ with tab_conc:
                           valor_glosa=('valor_glosa','sum'),
                           valor_pago=('valor_pago','sum'),
                           itens=('arquivo','count')))
-            denom = med_x['valor_apresentado'].replace(0, np.nan)  # PERF
-            med_x['glosa_pct'] = (med_x['valor_glosa']/denom).fillna(0)
+            med_x['glosa_pct'] = med_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
             med_x.to_excel(wr, index=False, sheet_name='Medicos')
 
             if 'numero_lote' in conc.columns:
@@ -1246,8 +1172,7 @@ with tab_conc:
                               valor_glosa=('valor_glosa','sum'),
                               valor_pago=('valor_pago','sum'),
                               itens=('arquivo','count')))
-                denom = lot_x['valor_apresentado'].replace(0, np.nan)  # PERF
-                lot_x['glosa_pct'] = (lot_x['valor_glosa']/denom).fillna(0)
+                lot_x['glosa_pct'] = lot_x.apply(lambda r: (r['valor_glosa']/r['valor_apresentado']) if r['valor_apresentado']>0 else 0, axis=1)
                 lot_x.to_excel(wr, index=False, sheet_name='Lotes')
 
             kpi_comp.to_excel(wr, index=False, sheet_name='KPIs_Competencia')
@@ -1258,7 +1183,6 @@ with tab_conc:
             file_name="tiss_conciliacao_analytics.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
 
 # =========================================================
 # ABA 2 — Faturas Glosadas (XLSX) (SEM gráficos)
@@ -1380,6 +1304,9 @@ with tab_glosas:
             if base_m.empty:
                 st.info("Sem glosas no recorte atual.")
             else:                
+                # ========================
+                # 📅 Glosa por mês de pagamento — versão personalizada
+                # ========================
                 mensal = (
                     base_m.groupby(["_pagto_ym", "_pagto_mes_br"], as_index=False)
                           .agg(
@@ -1456,7 +1383,8 @@ with tab_glosas:
             conv_df = conv_df.rename(columns=ren_map)
         
             # 3) Trazer Valor Cobrado e manter apenas as 4 colunas desejadas
-            conv_df = conv_df.merge(cob_df, on="Convênio", how="left", sort=False)  # PERF
+            conv_df = conv_df.merge(cob_df, on="Convênio", how="left")
+            # Se quisermos nome sem “(R$)”, usar "Valor Cobrado" mesmo:
             conv_df = conv_df.rename(columns={"Valor_Cobrado": "Valor Cobrado"})
         
             # 4) Selecionar e ordenar colunas
@@ -1483,6 +1411,7 @@ with tab_glosas:
             
             # ================================
             # Top 20 — Motivos de glosa por maior valor glosado
+            # (um ÚNICO quadro: visíveis ~5 linhas, demais via rolagem)
             # ================================
             st.markdown("### 🧾 Top 20 — Motivos de glosa por **maior valor glosado**")
             
@@ -1490,6 +1419,7 @@ with tab_glosas:
             if mot_df.empty:
                 st.info("Não foi possível montar o ranking de motivos (verifique as colunas de 'Motivo Glosa' e 'Descrição Glosa' nos arquivos).")
             else:
+                # Detecta a coluna de valor glosado
                 gl_col = "Valor Glosado (R$)" if "Valor Glosado (R$)" in mot_df.columns else (
                     "Valor_Glosado" if "Valor_Glosado" in mot_df.columns else None
                 )
@@ -1499,23 +1429,33 @@ with tab_glosas:
                     mot_view = mot_df.copy()
                     if gl_col != "Valor Glosado (R$)":
                         mot_view = mot_view.rename(columns={gl_col: "Valor Glosado (R$)"})
+            
+                    # Ordenar por Valor Glosado desc e, se existir, por Qtd desc
                     if "Qtd" in mot_view.columns:
                         mot_view = mot_view.sort_values(["Valor Glosado (R$)", "Qtd"], ascending=[False, False])
                     else:
                         mot_view = mot_view.sort_values(["Valor Glosado (R$)"], ascending=[False])
+            
+                    # Limitar ao TOP 20
                     mot_view = mot_view.head(20)
+            
+                    # Exibir SOMENTE as 3 colunas solicitadas (código, descrição, valor total glosado)
                     cols_show = [c for c in ["Motivo", "Descrição do Motivo", "Valor Glosado (R$)"] if c in mot_view.columns]
                     mot_view_fmt = apply_currency(mot_view[cols_show], ["Valor Glosado (R$)"])
+            
+                    # Um ÚNICO quadro com barra de rolagem (altura ~5 linhas)
                     st.dataframe(
                         mot_view_fmt,
                         use_container_width=True,
-                        height=260
+                        height=260   # ajuste fino, ~5 linhas visíveis; a partir da 6ª rola
                     )
 
-        # ---------- Itens/descrições com maior valor glosado ----------
+
+        # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         
+        # Bases e colunas
         desc_col = colmap.get("descricao")
         proc_col = colmap.get("procedimento")
         vc_col   = colmap.get("valor_cobrado")
@@ -1529,6 +1469,7 @@ with tab_glosas:
             if base_glosa.empty:
                 st.info("Sem itens glosados no recorte atual.")
             else:
+                # 1) Agregar por (Código + Descrição) quando possível, senão só por Descrição
                 group_keys = [desc_col]
                 if proc_col and (proc_col in df_view.columns):
                     group_keys = [proc_col, desc_col]
@@ -1542,21 +1483,32 @@ with tab_glosas:
                               )
                 )
         
+                # 2) Renomear colunas pedidas
                 ren_map = {desc_col: "Descrição do Item", "Valor_cobrado": "Valor cobrado", "Valor_glosado": "Valor glosado"}
                 if proc_col and (proc_col in agg.columns):
                     ren_map[proc_col] = "Código"
                 agg = agg.rename(columns=ren_map)
         
+                # 3) Ordenar por Valor glosado (desc) e Qtd
                 agg = agg.sort_values(["Valor glosado", "Qtd"], ascending=[False, False]).reset_index(drop=True)
+        
+                # 4) Manter somente as 6 colunas
+                cols_final = ["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]
+                
+                # Garantir que Código seja string (evita vírgulas, formatação numérica e arredondamentos)
                 if "Código" not in agg.columns:
                     agg["Código"] = ""
                 else:
                     agg["Código"] = agg["Código"].astype(str).str.replace(r"[^\dA-Za-z]+", "", regex=True).str.strip()
                 
+                # Reorganizar colunas
                 agg = agg[["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]]
 
+        
+                # 5) Formatar moedas
                 agg_fmt = apply_currency(agg.copy(), ["Valor cobrado", "Valor glosado"])
         
+                # 6) Adicionar coluna 'Detalhes' (checkbox) — seleção continua por Descrição do Item
                 sel_state_key = "top_itens_editor_selected"
                 ver_key       = "top_itens_editor_version"
                 if ver_key not in st.session_state:
@@ -1565,11 +1517,57 @@ with tab_glosas:
                     st.session_state[sel_state_key] = None
         
                 selected_item_name = st.session_state[sel_state_key]
+        
+                # série booleana com a linha selecionada (por Descrição)
                 prev_series = (agg_fmt.get("Descrição do Item", "").astype(str) == str(selected_item_name))
                 agg_fmt["Detalhes"] = prev_series
         
                 st.caption("Clique em **Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
-                
+                editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
+        
+                edited = st.data_editor(
+                    agg_fmt,
+                    use_container_width=True,
+                    height=420,
+                    disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
+                    column_config={
+                        "Detalhes": st.column_config.CheckboxColumn(
+                            help="Mostrar detalhes deste item logo abaixo",
+                            default=False
+                        )
+                    },
+                    key=editor_key
+                )
+        
+                # Detectar troca de seleção
+                if "Descrição do Item" not in edited.columns:
+                    new_selected_item = None
+                else:
+                    curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
+                    turned_on  = (curr_series & ~prev_series)
+                    if turned_on.any():
+                        idx = turned_on[turned_on].index[-1]
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+                    elif not curr_series.any():
+                        new_selected_item = None
+                    elif curr_series.sum() == 1:
+                        idx = curr_series.idxmax()
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+                    else:
+                        candidates = curr_series[curr_series].index.tolist()
+                        prev_idx = prev_series[prev_series].index.tolist()
+                        pick = [i for i in candidates if i not in prev_idx]
+                        idx = (pick[-1] if pick else candidates[-1])
+                        new_selected_item = edited.loc[idx, "Descrição do Item"]
+        
+                if new_selected_item != selected_item_name:
+                    st.session_state[sel_state_key] = new_selected_item
+                    st.session_state[ver_key] += 1
+                    st.rerun()
+        
+                selected_item_name = st.session_state[sel_state_key]
+
+
             # ============ BUSCA POR Nº AMHPTISS ============
             amhp_col = colmap.get("amhptiss")
             if amhp_col and amhp_col in df_g.columns:
@@ -1590,32 +1588,69 @@ with tab_glosas:
             st.session_state.setdefault("amhp_query", "")
             st.session_state.setdefault("amhp_result", None)
 
-            # --- DENTRO DA ABA DE FATURAS GLOSADAS ---
-
             st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
             st.markdown("---")
-            
-            # 1. Lógica de Interrupção Imediata (Fechar Busca)
-            if st.button("❌ Fechar resultados", key="btn_fechar_amhp"):
-                st.session_state.amhp_query = ""
-                st.session_state.amhp_result = None
-                st.rerun() # Interrompe aqui e recomeça limpo
-            
-            col1, col2 = st.columns([0.65, 0.35])
-            with col1:
-                numero_input = st.text_input("Informe o Nº AMHPTISS", value=st.session_state.amhp_query)
-                if st.button("🔍 Buscar", key="btn_buscar_amhp"):
-                    num = re.sub(r"\D+", "", str(numero_input))
-                    if num:
+
+            if not amhp_col or amhp_col not in df_g.columns:
+                st.info("Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados.")
+            else:
+                col1, col2 = st.columns([0.65, 0.35])
+                with col1:
+                    numero_input = st.text_input(
+                        "Informe o Nº AMHPTISS",
+                        value=st.session_state.amhp_query,
+                        placeholder="Ex.: 61916098"
+                    )
+                    cbt1, cbt2 = st.columns(2)
+                    with cbt1:
+                        clique_buscar = st.button("🔍 Buscar", key="btn_buscar_amhp")
+                    with cbt2:
+                        clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhp")
+                with col2:
+                    ignorar_filtros = st.checkbox(
+                        "Ignorar filtros de Convênio/Mês",
+                        False,
+                        help="Busca no dataset completo, ignorando filtros ativos."
+                    )
+
+                def digits(s): return re.sub(r"\D+", "", str(s or ""))
+
+
+                if clique_fechar:
+                    st.session_state.amhp_query = ""
+                    st.session_state.amhp_result = None
+                    st.rerun()   # 🔄 não interrompe a página, apenas recarrega
+
+
+                
+                if clique_buscar:
+                    num = digits(numero_input)
+                    if not num:
+                        st.warning("Digite um Nº AMHPTISS válido.")
+                    else:
                         st.session_state.amhp_query = num
                         base = df_g if ignorar_filtros else df_view
-                        # Busca indexada extremamente rápida
+                
                         if num in amhp_index:
-                            idx_validos = [i for i in amhp_index[num] if i in base.index]
-                            st.session_state.amhp_result = base.loc[idx_validos]
+                            idx = amhp_index[num]
+                
+                            # ✅ mantém só os índices existentes no DF base (evita KeyError)
+                            #    Obs.: a ordem é preservada como no índice da guia (idx)
+                            idx_validos = [i for i in idx if i in base.index]
+                
+                            if idx_validos:
+                                result = base.loc[idx_validos]
+                            else:
+                                # A guia existe no dataset completo, mas saiu com os filtros atuais
+                                result = pd.DataFrame()
                         else:
-                            st.session_state.amhp_result = pd.DataFrame()
-                        st.rerun()
+                            # Nº AMHPTISS inexistente no dataset
+                            result = pd.DataFrame()
+                
+                        # ✅ SALVA o resultado no estado para ser lido abaixo
+                        st.session_state.amhp_result = result
+
+
 
                 result = st.session_state.amhp_result
                 numero_alvo = st.session_state.amhp_query
@@ -1689,89 +1724,17 @@ with tab_glosas:
                             st.caption("Dica: se algum item não aparecer, marque **“Ignorar filtros de Convênio/Mês”**.")
 
         # === DETALHES DO ITEM SELECIONADO ===
-        
-
-        # ============================================================
-        # OTIMIZAÇÃO: evitar re-render pesado do data_editor ao fechar
-        # ============================================================
-        
-        must_close = False
-        new_selected_item = selected_item_name  # mantém default
-        
-        # Se há item selecionado e NÃO estamos fechando, renderiza o editor
-        if selected_item_name and not st.session_state.get("close_details_clicked", False):
-            editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
-            edited = st.data_editor(
-                agg_fmt,
-                use_container_width=True,
-                height=420,
-                disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
-                column_config={
-                    "Detalhes": st.column_config.CheckboxColumn(
-                        help="Mostrar detalhes deste item logo abaixo",
-                        default=False
-                    )
-                },
-                key=editor_key
-            )
-        
-            # Lógica original de seleção preservada
-            if "Descrição do Item" not in edited.columns:
-                new_selected_item = None
-            else:
-                curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
-                turned_on  = (curr_series & ~prev_series)
-                if turned_on.any():
-                    idx = turned_on[turned_on].index[-1]
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
-                elif not curr_series.any():
-                    new_selected_item = None
-                elif curr_series.sum() == 1:
-                    idx = curr_series.idxmax()
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
-                else:
-                    candidates = curr_series[curr_series].index.tolist()
-                    prev_idx = prev_series[prev_series].index.tolist()
-                    pick = [i for i in candidates if i not in prev_idx]
-                    idx = (pick[-1] if pick else candidates[-1])
-                    new_selected_item = edited.loc[idx, "Descrição do Item"]
-        
-            if new_selected_item != selected_item_name:
-                st.session_state[sel_state_key] = new_selected_item
-                st.session_state[ver_key] += 1
-                st.rerun()
-        
-        # Se há item selecionado e foi clicado "Fechar detalhes", marcamos para pular o editor
-       
-        if st.session_state.get("close_details_clicked", False):
-            st.session_state["close_details_clicked"] = False
-            st.session_state[sel_state_key] = None
-            st.session_state[ver_key] += 1
-            st.rerun()
-
-        
-        # ============================================================
-        # TRATAMENTO DO FECHAMENTO — faz o rerun ANTES de desenhar detalhes
-        # ============================================================
-        if must_close:
-            st.session_state["close_details_clicked"] = False
-            st.session_state[sel_state_key] = None
-            st.session_state[ver_key] += 1
-            st.rerun()
-        
-        # ============================================================
-        # DETALHES — só renderiza quando precisa (e nunca ao fechar)
-        # ============================================================
-        if selected_item_name and not must_close:
+        if selected_item_name:
             st.markdown("---")
             st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
-        
-            # Ao clicar, só seta flag e deixa a lógica acima cuidar do rerun
+
+            
             if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
-                st.session_state["close_details_clicked"] = True
-                st.rerun()
-        
-            # A partir daqui, seu bloco original de DETALHES permanece igual:
+                st.session_state[sel_state_key] = None
+                st.session_state[ver_key] += 1
+                st.rerun()   # 🔄 não afeta outros blocos
+
+
             desc_col_map = colmap.get("descricao")
             if not desc_col_map or desc_col_map not in df_view.columns:
                 st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
@@ -1779,14 +1742,14 @@ with tab_glosas:
                 sel_name_str = str(selected_item_name)
                 mask_item = (df_view[desc_col_map].astype(str) == sel_name_str)
                 mask_glosa = (mask_item & (df_view["_is_glosa"] == True)) if "_is_glosa" in df_view.columns else mask_item
-        
+
                 amhp_col2 = colmap.get("amhptiss")
                 if not amhp_col2:
                     for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
                         if cand in df_view.columns:
                             amhp_col2 = cand
                             break
-        
+
                 possiveis = [
                     amhp_col2,
                     colmap.get("convenio"),
@@ -1801,45 +1764,44 @@ with tab_glosas:
                     colmap.get("valor_recursado"),
                 ]
                 show_cols = [c for c in possiveis if c and c in df_view.columns]
-        
+
                 df_item = df_view.loc[mask_glosa, show_cols]
-        
+
                 vc = colmap.get("valor_cobrado")
                 vg = colmap.get("valor_glosa")
                 vr = colmap.get("valor_recursado")
-        
+
                 cols_min = [c for c in [vc, vg] if c and c in df_view.columns]
                 df_item_all = df_view.loc[mask_item, cols_min] if cols_min else df_view.loc[mask_item, []]
-        
+
                 qtd_itens_cobrados = int(mask_item.sum())
                 total_cobrado = float(df_item_all[vc].sum()) if vc in df_item_all.columns else 0.0
-        
+
                 if "_valor_glosa_abs" in df_view.columns:
                     total_glosado = float(df_view.loc[mask_glosa, "_valor_glosa_abs"].sum())
                 elif vg and vg in df_view.columns:
                     total_glosado = float(df_view.loc[mask_glosa, vg].abs().sum())
                 else:
                     total_glosado = 0.0
-        
+
                 st.markdown("### 📌 Resumo do item")
                 st.write(f"**Itens cobrados:** {qtd_itens_cobrados}")
                 st.write(f"**Total cobrado:** {f_currency(total_cobrado)}")
                 st.write(f"**Total glosado:** {f_currency(total_glosado)}")
                 st.markdown("---")
-        
-                # Ordenação pelo valor glosado (quando existir)
+
                 if "_valor_glosa_abs" in df_view.columns:
                     order_series = df_view.loc[mask_glosa, "_valor_glosa_abs"]
                 elif vg and vg in df_view.columns:
                     order_series = df_view.loc[mask_glosa, vg].abs()
                 else:
                     order_series = None
-        
+
                 if order_series is not None and not order_series.empty:
                     df_item = df_item.loc[order_series.sort_values(ascending=False).index]
-        
+
                 money_cols_fmt = [c for c in [vc, vg, vr] if c in df_item.columns]
-        
+
                 if not df_item.empty:
                     st.dataframe(
                         apply_currency(df_item, money_cols_fmt),
@@ -1851,7 +1813,7 @@ with tab_glosas:
                         "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
                         "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
                     )
-        
+
                 base_cols = df_item.columns.tolist()
                 st.download_button(
                     "⬇️ Baixar relação (CSV) — apenas guias com glosa",
@@ -1859,8 +1821,6 @@ with tab_glosas:
                     file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', selected_item_name)[:40]}.csv",
                     mime="text/csv",
                 )
-
-
 
         # Export análise XLSX (glosas) — mensal somando Valor Cobrado (Valor Original)
         st.markdown("---")
@@ -1948,8 +1908,3 @@ with tab_glosas:
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
-
-
-
-
-
