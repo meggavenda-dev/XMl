@@ -1431,53 +1431,40 @@ with tab_glosas:
                 st.rerun()
         
             # Usa a seleção vigente do estado
-            selected_item_name = st.session_state[sel_state_key]                              
+            selected_item_name = st.session_state[sel_state_key]                           
             
            
             
+
             # ============================================================
             # 🔎 BUSCA OTIMIZADA POR Nº AMHPTISS (INSTANTÂNEA)
             # ============================================================
             
             amhp_col = colmap.get("amhptiss")
             
-            # ------------------------------------------------------------
-            # 1) Criar normalização + índice invertido (cacheado)
-            # ------------------------------------------------------------
+            # 1) Normalização + índice invertido (cacheado)
             if amhp_col and amhp_col in df_g.columns:
             
                 @st.cache_data
                 def normalize_and_index(df, col):
                     df2 = df.copy()
-            
-                    # Normalização única (antes era repetida muitas vezes)
                     df2["_amhp_digits"] = (
-                        df2[col]
-                        .astype(str)
-                        .str.replace(r"[^\d]", "", regex=True)
-                        .str.strip()
+                        df2[col].astype(str).str.replace(r"[^\d]", "", regex=True).str.strip()
                     )
-            
-                    # Índice invertido: O(1) pra buscar
                     index = {}
                     for i, v in df2["_amhp_digits"].items():
                         if v not in index:
                             index[v] = []
                         index[v].append(i)
-            
                     return df2, index
             
                 df_g, amhp_index = normalize_and_index(df_g, amhp_col)
             
-            # ------------------------------------------------------------
-            # 2) Estado persistente da busca
-            # ------------------------------------------------------------
+            # 2) Estado persistente
             st.session_state.setdefault("amhp_query", "")
             st.session_state.setdefault("amhp_result", None)
             
-            # ------------------------------------------------------------
-            # 3) UI da busca
-            # ------------------------------------------------------------
+            # 3) UI
             st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
             st.markdown("---")
             
@@ -1493,7 +1480,6 @@ with tab_glosas:
                         value=st.session_state.amhp_query,
                         placeholder="Ex.: 61916098"
                     )
-            
                     cbt1, cbt2 = st.columns(2)
                     with cbt1:
                         clique_buscar = st.button("🔍 Buscar", key="btn_buscar_amhp")
@@ -1507,43 +1493,31 @@ with tab_glosas:
                         help="Busca no dataset completo, ignorando filtros ativos."
                     )
             
-                # Normalizador de dígitos
-                def digits(s):
-                    return re.sub(r"\D+", "", str(s or ""))
+                # helper
+                def digits(s): return re.sub(r"\D+", "", str(s or ""))
             
-                # --------------------------------------------------------
-                # 4) Fechar resultados
-                # --------------------------------------------------------
+                # 4) Fechar (instantâneo)
                 if clique_fechar:
                     st.session_state.amhp_query = ""
                     st.session_state.amhp_result = None
-                    st.rerun()
+                    st.stop()
             
-                # --------------------------------------------------------
                 # 5) Buscar
-                # --------------------------------------------------------
                 if clique_buscar:
                     num = digits(numero_input)
-            
                     if not num:
                         st.warning("Digite um Nº AMHPTISS válido.")
                     else:
                         st.session_state.amhp_query = num
-            
                         base = df_g if ignorar_filtros else df_view
-            
                         if num in amhp_index:
-                            # Seleciona só as linhas do índice
                             idx = amhp_index[num]
-                            result = base.loc[idx].copy()
+                            result = base.loc[idx]  # sem .copy(): mais leve (não vamos mutar)
                         else:
                             result = pd.DataFrame()
-            
                         st.session_state.amhp_result = result
             
-                # --------------------------------------------------------
-                # 6) Exibir resultado (não recalcula nada!)
-                # --------------------------------------------------------
+                # 6) Exibir
                 result = st.session_state.amhp_result
                 numero_alvo = st.session_state.amhp_query
             
@@ -1555,30 +1529,19 @@ with tab_glosas:
                         msg = "" if ignorar_filtros else " com os filtros atuais"
                         st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg}.")
                     else:
-                        # Normalizar motivo
+                        # Normalizar motivo (apenas exibição)
                         motivo_col = colmap.get("motivo")
                         if motivo_col and motivo_col in result.columns:
-                            result[motivo_col] = (
-                                result[motivo_col]
-                                .astype(str)
-                                .str.replace(r"[^\d]", "", regex=True)
-                                .str.strip()
+                            result = result.assign(
+                                **{motivo_col: result[motivo_col].astype(str).str.replace(r"[^\d]", "", regex=True).str.strip()}
                             )
             
                         # Resumo
-                        qtd_cobrados = len(result)
-            
                         col_vc = colmap.get("valor_cobrado")
                         col_vg = colmap.get("valor_glosa")
-            
-                        total_cobrado = float(
-                            pd.to_numeric(result[col_vc], errors="coerce").fillna(0).sum()
-                        ) if col_vc in result else 0
-            
-                        total_glosado = float(
-                            pd.to_numeric(result[col_vg], errors="coerce").abs().fillna(0).sum()
-                        ) if col_vg in result else 0
-            
+                        qtd_cobrados = len(result)
+                        total_cobrado = float(pd.to_numeric(result[col_vc], errors="coerce").fillna(0).sum()) if col_vc in result else 0.0
+                        total_glosado = float(pd.to_numeric(result[col_vg], errors="coerce").abs().fillna(0).sum()) if col_vg in result else 0.0
                         qtd_glosados = int((result["_is_glosa"] == True).sum()) if "_is_glosa" in result.columns else 0
             
                         st.markdown("### 📌 Resumo da guia")
@@ -1588,18 +1551,14 @@ with tab_glosas:
                         st.write(f"**Itens glosados:** {qtd_glosados}")
                         st.markdown("---")
             
-                        # Renomear colunas para exibir
+                        # Renome para exibir
                         ren = {}
                         if col_vc and col_vc in result.columns: ren[col_vc] = "Valor Cobrado (R$)"
                         if col_vg and col_vg in result.columns: ren[col_vg] = "Valor Glosado (R$)"
-            
                         col_vr = colmap.get("valor_recursado")
-                        if col_vr and col_vr in result.columns:
-                            ren[col_vr] = "Valor Recursado (R$)"
+                        if col_vr and col_vr in result.columns: ren[col_vr] = "Valor Recursado (R$)"
+                        result_show = result.rename(columns=ren)
             
-                        result = result.rename(columns=ren)
-            
-                        # Montar colunas para exibição
                         exibir_cols = [
                             amhp_col,
                             colmap.get("convenio"),
@@ -1615,19 +1574,17 @@ with tab_glosas:
                             "Valor Glosado (R$)",
                             "Valor Recursado (R$)",
                         ]
-                        exibir_cols = [c for c in exibir_cols if c in result.columns]
+                        exibir_cols = [c for c in exibir_cols if c in result_show.columns]
             
-                        # Exibir
                         st.dataframe(
-                            apply_currency(result[exibir_cols],
-                                           ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
+                            apply_currency(result_show[exibir_cols], ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
                             use_container_width=True,
                             height=420
                         )
             
                         st.download_button(
                             "⬇️ Baixar resultado (CSV)",
-                            result[exibir_cols].to_csv(index=False).encode("utf-8"),
+                            result_show[exibir_cols].to_csv(index=False).encode("utf-8"),
                             file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
                             mime="text/csv"
                         )
