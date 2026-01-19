@@ -1431,166 +1431,210 @@ with tab_glosas:
                 st.rerun()
         
             # Usa a seleção vigente do estado
-            selected_item_name = st.session_state[sel_state_key]
-                                
+            selected_item_name = st.session_state[sel_state_key]                              
             
            
-            # ==========================================================
-            # 🔎 Buscar por Nº AMHPTISS — ORGANIZADO E MAIS RÁPIDO
-            # ==========================================================
             
-            st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
-            st.markdown("---")
+            # ============================================================
+            # 🔎 BUSCA OTIMIZADA POR Nº AMHPTISS (INSTANTÂNEA)
+            # ============================================================
             
             amhp_col = colmap.get("amhptiss")
             
-            # Criar estado persistente se ainda não existir
-            st.session_state.setdefault("amhp_result_df", None)
-            st.session_state.setdefault("amhp_result_num", "")
+            # ------------------------------------------------------------
+            # 1) Criar normalização + índice invertido (cacheado)
+            # ------------------------------------------------------------
+            if amhp_col and amhp_col in df_g.columns:
+            
+                @st.cache_data
+                def normalize_and_index(df, col):
+                    df2 = df.copy()
+            
+                    # Normalização única (antes era repetida muitas vezes)
+                    df2["_amhp_digits"] = (
+                        df2[col]
+                        .astype(str)
+                        .str.replace(r"[^\d]", "", regex=True)
+                        .str.strip()
+                    )
+            
+                    # Índice invertido: O(1) pra buscar
+                    index = {}
+                    for i, v in df2["_amhp_digits"].items():
+                        if v not in index:
+                            index[v] = []
+                        index[v].append(i)
+            
+                    return df2, index
+            
+                df_g, amhp_index = normalize_and_index(df_g, amhp_col)
+            
+            # ------------------------------------------------------------
+            # 2) Estado persistente da busca
+            # ------------------------------------------------------------
+            st.session_state.setdefault("amhp_query", "")
+            st.session_state.setdefault("amhp_result", None)
+            
+            # ------------------------------------------------------------
+            # 3) UI da busca
+            # ------------------------------------------------------------
+            st.markdown("## 🔎 Buscar por **Nº AMHPTISS**")
+            st.markdown("---")
             
             if not amhp_col or amhp_col not in df_g.columns:
                 st.info("Não foi possível identificar a coluna de **AMHPTISS** nos arquivos enviados.")
             else:
             
-                with st.container():
+                col1, col2 = st.columns([0.65, 0.35])
             
-                    # Campo + botões lado a lado
-                    c1, c2 = st.columns([0.65, 0.35])
+                with col1:
+                    numero_input = st.text_input(
+                        "Informe o Nº AMHPTISS",
+                        value=st.session_state.amhp_query,
+                        placeholder="Ex.: 61916098"
+                    )
             
-                    with c1:
-                        numero_input = st.text_input(
-                            "Informe o Nº AMHPTISS",
-                            value=st.session_state.amhp_result_num,
-                            key="amhp_input",
-                            placeholder="Ex.: 61916098"
-                        )
+                    cbt1, cbt2 = st.columns(2)
+                    with cbt1:
+                        clique_buscar = st.button("🔍 Buscar", key="btn_buscar_amhp")
+                    with cbt2:
+                        clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhp")
             
-                        b1, b2 = st.columns([0.5, 0.5])
-                        with b1:
-                            clique_buscar = st.button("🔎 Buscar", key="btn_buscar_amhptiss")
-                        with b2:
-                            clique_fechar = st.button("❌ Fechar resultados", key="btn_fechar_amhptiss")
+                with col2:
+                    ignorar_filtros = st.checkbox(
+                        "Ignorar filtros de Convênio/Mês",
+                        False,
+                        help="Busca no dataset completo, ignorando filtros ativos."
+                    )
             
-                    with c2:
-                        ignorar_filtros = st.checkbox(
-                            "Ignorar filtros de Convênio/Mês",
-                            False,
-                            key="chk_amhp_ignorar",
-                            help="Busca no dataset completo, ignorando filtros ativos."
-                        )
+                # Normalizador de dígitos
+                def digits(s):
+                    return re.sub(r"\D+", "", str(s or ""))
             
-                    # Normalizar dígitos
-                    def digits(s):
-                        return re.sub(r"\D+", "", str(s or ""))
+                # --------------------------------------------------------
+                # 4) Fechar resultados
+                # --------------------------------------------------------
+                if clique_fechar:
+                    st.session_state.amhp_query = ""
+                    st.session_state.amhp_result = None
+                    st.rerun()
             
-                    # FECHAR — instantâneo                    
-                    if clique_fechar:
-                        st.session_state.amhp_result_df = None
-                        st.session_state.amhp_result_num = ""
-                        st.rerun()   # ← força atualização instantânea
-
-                        
+                # --------------------------------------------------------
+                # 5) Buscar
+                # --------------------------------------------------------
+                if clique_buscar:
+                    num = digits(numero_input)
             
-                    # BUSCAR
-                    if clique_buscar:
-                        num = digits(numero_input)
-                        if not num:
-                            st.warning("Digite um Nº AMHPTISS válido.")
+                    if not num:
+                        st.warning("Digite um Nº AMHPTISS válido.")
+                    else:
+                        st.session_state.amhp_query = num
+            
+                        base = df_g if ignorar_filtros else df_view
+            
+                        if num in amhp_index:
+                            # Seleciona só as linhas do índice
+                            idx = amhp_index[num]
+                            result = base.loc[idx].copy()
                         else:
-                            base = df_g if ignorar_filtros else df_view
-                            tmp = base.copy()
-                            tmp["_digits"] = tmp[amhp_col].astype(str).map(digits)
+                            result = pd.DataFrame()
             
-                            result = tmp[tmp["_digits"] == num].copy()
+                        st.session_state.amhp_result = result
             
-                            st.session_state.amhp_result_df = result
-                            st.session_state.amhp_result_num = num
+                # --------------------------------------------------------
+                # 6) Exibir resultado (não recalcula nada!)
+                # --------------------------------------------------------
+                result = st.session_state.amhp_result
+                numero_alvo = st.session_state.amhp_query
             
-            
-                # ==========================================================
-                # RESULTADOS DA BUSCA
-                # ==========================================================
-            
-                if st.session_state.amhp_result_df is not None:
-            
-                    result = st.session_state.amhp_result_df.copy()
-                    numero_alvo = st.session_state.amhp_result_num
-            
+                if result is not None:
                     st.markdown("---")
                     st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
             
-                    # Normalizar motivo (sem vírgula)
-                    motivo_col = colmap.get("motivo")
-                    if motivo_col and motivo_col in result.columns:
-                        result[motivo_col] = (
-                            result[motivo_col]
-                            .astype(str)
-                            .str.replace(r"[^\d]", "", regex=True)
-                            .str.strip()
+                    if result.empty:
+                        msg = "" if ignorar_filtros else " com os filtros atuais"
+                        st.info(f"Nenhuma linha encontrada para esse AMHPTISS{msg}.")
+                    else:
+                        # Normalizar motivo
+                        motivo_col = colmap.get("motivo")
+                        if motivo_col and motivo_col in result.columns:
+                            result[motivo_col] = (
+                                result[motivo_col]
+                                .astype(str)
+                                .str.replace(r"[^\d]", "", regex=True)
+                                .str.strip()
+                            )
+            
+                        # Resumo
+                        qtd_cobrados = len(result)
+            
+                        col_vc = colmap.get("valor_cobrado")
+                        col_vg = colmap.get("valor_glosa")
+            
+                        total_cobrado = float(
+                            pd.to_numeric(result[col_vc], errors="coerce").fillna(0).sum()
+                        ) if col_vc in result else 0
+            
+                        total_glosado = float(
+                            pd.to_numeric(result[col_vg], errors="coerce").abs().fillna(0).sum()
+                        ) if col_vg in result else 0
+            
+                        qtd_glosados = int((result["_is_glosa"] == True).sum()) if "_is_glosa" in result.columns else 0
+            
+                        st.markdown("### 📌 Resumo da guia")
+                        st.write(f"**Total Cobrado:** {f_currency(total_cobrado)}")
+                        st.write(f"**Total Glosado:** {f_currency(total_glosado)}")
+                        st.write(f"**Itens cobrados:** {qtd_cobrados}")
+                        st.write(f"**Itens glosados:** {qtd_glosados}")
+                        st.markdown("---")
+            
+                        # Renomear colunas para exibir
+                        ren = {}
+                        if col_vc and col_vc in result.columns: ren[col_vc] = "Valor Cobrado (R$)"
+                        if col_vg and col_vg in result.columns: ren[col_vg] = "Valor Glosado (R$)"
+            
+                        col_vr = colmap.get("valor_recursado")
+                        if col_vr and col_vr in result.columns:
+                            ren[col_vr] = "Valor Recursado (R$)"
+            
+                        result = result.rename(columns=ren)
+            
+                        # Montar colunas para exibição
+                        exibir_cols = [
+                            amhp_col,
+                            colmap.get("convenio"),
+                            colmap.get("prestador"),
+                            colmap.get("descricao"),
+                            motivo_col,
+                            colmap.get("desc_motivo"),
+                            colmap.get("tipo_glosa"),
+                            colmap.get("data_realizado"),
+                            colmap.get("data_pagamento"),
+                            colmap.get("cobranca"),
+                            "Valor Cobrado (R$)",
+                            "Valor Glosado (R$)",
+                            "Valor Recursado (R$)",
+                        ]
+                        exibir_cols = [c for c in exibir_cols if c in result.columns]
+            
+                        # Exibir
+                        st.dataframe(
+                            apply_currency(result[exibir_cols],
+                                           ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
+                            use_container_width=True,
+                            height=420
                         )
             
-                    # ===========================
-                    # 📌 RESUMO DA GUIA
-                    # ===========================
-                    qtd_cobrados = len(result)
-                    qtd_glosados = int(result["_is_glosa"].sum()) if "_is_glosa" in result else 0
+                        st.download_button(
+                            "⬇️ Baixar resultado (CSV)",
+                            result[exibir_cols].to_csv(index=False).encode("utf-8"),
+                            file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
+                            mime="text/csv"
+                        )
             
-                    # totais
-                    col_valor_c = colmap["valor_cobrado"]
-                    total_cob = float(pd.to_numeric(result[col_valor_c], errors="coerce").fillna(0).sum()) if col_valor_c in result else 0
-            
-                    col_valor_g = colmap["valor_glosa"]
-                    total_glo = float(
-                        pd.to_numeric(result[col_valor_g], errors="coerce").abs().fillna(0).sum()
-                    ) if col_valor_g in result else 0
-            
-                    st.markdown("### 📌 Resumo da guia")
-                    st.write(f"**Total Cobrado:** {f_currency(total_cob)}")
-                    st.write(f"**Total Glosado:** {f_currency(total_glo)}")
-                    st.write(f"**Itens cobrados:** {qtd_cobrados}")
-                    st.write(f"**Itens glosados:** {qtd_glosados}")
-                    st.markdown("---")
-            
-                    # Renomear colunas
-                    ren = {}
-                    if col_valor_c in result.columns: ren[col_valor_c] = "Valor Cobrado (R$)"
-                    if col_valor_g in result.columns: ren[col_valor_g] = "Valor Glosado (R$)"
-                    col_valor_rec = colmap.get("valor_recursado")
-                    if col_valor_rec and col_valor_rec in result.columns: ren[col_valor_rec] = "Valor Recursado (R$)"
-                    result = result.rename(columns=ren)
-            
-                    # Exibir tabela
-                    exibir_cols = [
-                        amhp_col,
-                        colmap.get("convenio"),
-                        colmap.get("prestador"),
-                        colmap.get("descricao"),
-                        motivo_col,
-                        colmap.get("desc_motivo"),
-                        colmap.get("tipo_glosa"),
-                        colmap.get("data_realizado"),
-                        colmap.get("data_pagamento"),
-                        colmap.get("cobranca"),
-                        "Valor Cobrado (R$)",
-                        "Valor Glosado (R$)",
-                        "Valor Recursado (R$)",
-                    ]
-                    exibir_cols = [c for c in exibir_cols if c in result.columns]
-            
-                    st.dataframe(
-                        apply_currency(result[exibir_cols], ["Valor Cobrado (R$)", "Valor Glosado (R$)", "Valor Recursado (R$)"]),
-                        use_container_width=True,
-                        height=420
-                    )
-            
-                    st.download_button(
-                        "⬇️ Baixar resultado (CSV)",
-                        result[exibir_cols].to_csv(index=False).encode("utf-8"),
-                        file_name=f"itens_AMHPTISS_{numero_alvo}.csv",
-                        mime="text/csv"
-                    )
+                        if not ignorar_filtros:
+                            st.caption("Dica: se algum item não aparecer, marque **“Ignorar filtros de Convênio/Mês”**.")
 
-            
                 
                 # Exibição dos resultados (se houver no estado)
 
