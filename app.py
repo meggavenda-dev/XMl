@@ -1502,14 +1502,16 @@ with tab_glosas:
                     result = st.session_state.amhp_result_df.copy()
                     numero_alvo = st.session_state.amhp_result_num
                 
-                    # --- 🔧 Normalizar coluna AMHPTISS para string sem vírgulas ---
-                    if amhp_col in result.columns:
-                        result[amhp_col] = (
-                            result[amhp_col]
+                   
+                     --- 🔧 Normalizar motivo de glosa (evitar 2,012 etc.) ---
+                    motivo_col = colmap.get("motivo")
+                    if motivo_col and motivo_col in result.columns:
+                        result[motivo_col] = (
+                            result[motivo_col]
                             .astype(str)
-                            .str.replace(r"[^\d]", "", regex=True)   # remove vírgula, ponto etc.
+                            .str.replace(r"[^\d]", "", regex=True)   # remove vírgula, ponto
+                            .str.strip()
                         )
-
             
                     st.markdown("---")
                     st.subheader(f"🧾 Itens da guia — AMHPTISS **{numero_alvo}**")
