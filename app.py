@@ -787,14 +787,17 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
     
+
+     🔧 NORMALIZAÇÃO GLOBAL — AMHPTISS sempre como string limpa (sem vírgula, sem ponto, sem notação científica)
     amhp_col = colmap.get("amhptiss")
     if amhp_col and amhp_col in df.columns:
         df[amhp_col] = (
             df[amhp_col]
             .astype(str)
-            .str.replace(r"[^\d]", "", regex=True)  # deixa só dígitos
+            .str.replace(r"[^\d]", "", regex=True)  # remove vírgula, ponto, espaços etc
             .str.strip()
         )
+
 
     # Números
     for c in [colmap["valor_cobrado"], colmap["valor_glosa"], colmap["valor_recursado"]]:
