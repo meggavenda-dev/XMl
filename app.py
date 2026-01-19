@@ -786,6 +786,15 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         # NOVO: status "Cobrança" (ex.: Normal, Glosa Posterior)
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
+    
+    amhp_col = colmap.get("amhptiss")
+    if amhp_col and amhp_col in df.columns:
+        df[amhp_col] = (
+            df[amhp_col]
+            .astype(str)
+            .str.replace(r"[^\d]", "", regex=True)  # deixa só dígitos
+            .str.strip()
+        )
 
     # Números
     for c in [colmap["valor_cobrado"], colmap["valor_glosa"], colmap["valor_recursado"]]:
