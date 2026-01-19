@@ -1623,15 +1623,15 @@ with tab_glosas:
                     (df_view[desc_col_map].astype(str) == str(selected_item_name)) &
                     (df_view["_is_glosa"] == True)
                 ].copy()
-                
-                if amhp_col2 and amhp_col2 in df_item.columns:
-                    df_item[amhp_col2] = (
-                        df_item[amhp_col2]
-                        .astype(str)
-                        .str.replace(r"[^\d]", "", regex=True)
-                        .str.strip()
-                    )
 
+            if amhp_col2 and amhp_col2 in df_item.columns:
+                df_item[amhp_col2] = (
+                    df_item[amhp_col2]
+                    .astype(str)
+                    .str.replace(r"[^\d]", "", regex=True)
+                    .str.strip()
+                )
+                               
         
                 if df_item.empty:
                     st.info(
