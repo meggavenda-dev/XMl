@@ -1813,4 +1813,3 @@ with tab_glosas:
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
-
