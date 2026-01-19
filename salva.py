@@ -1569,49 +1569,7 @@ with tab_glosas:
                 agg_fmt["Detalhes"] = prev_series
         
                 st.caption("Clique em **Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
-                editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
-        
-                edited = st.data_editor(
-                    agg_fmt,
-                    use_container_width=True,
-                    height=420,
-                    disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
-                    column_config={
-                        "Detalhes": st.column_config.CheckboxColumn(
-                            help="Mostrar detalhes deste item logo abaixo",
-                            default=False
-                        )
-                    },
-                    key=editor_key
-                )
-        
-                if "Descrição do Item" not in edited.columns:
-                    new_selected_item = None
-                else:
-                    curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
-                    turned_on  = (curr_series & ~prev_series)
-                    if turned_on.any():
-                        idx = turned_on[turned_on].index[-1]
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-                    elif not curr_series.any():
-                        new_selected_item = None
-                    elif curr_series.sum() == 1:
-                        idx = curr_series.idxmax()
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-                    else:
-                        candidates = curr_series[curr_series].index.tolist()
-                        prev_idx = prev_series[prev_series].index.tolist()
-                        pick = [i for i in candidates if i not in prev_idx]
-                        idx = (pick[-1] if pick else candidates[-1])
-                        new_selected_item = edited.loc[idx, "Descrição do Item"]
-        
-                if new_selected_item != selected_item_name:
-                    st.session_state[sel_state_key] = new_selected_item
-                    st.session_state[ver_key] += 1
-                    st.rerun()
-        
-                selected_item_name = st.session_state[sel_state_key]
-
+                
             # ============ BUSCA POR Nº AMHPTISS ============
             amhp_col = colmap.get("amhptiss")
             if amhp_col and amhp_col in df_g.columns:
@@ -1755,15 +1713,84 @@ with tab_glosas:
                             st.caption("Dica: se algum item não aparecer, marque **“Ignorar filtros de Convênio/Mês”**.")
 
         # === DETALHES DO ITEM SELECIONADO ===
-        if selected_item_name:
-            st.markdown("---")
-            st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
+        
 
-            if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
-                st.session_state[sel_state_key] = None
+        # ============================================================
+        # OTIMIZAÇÃO: evitar re-render pesado do data_editor ao fechar
+        # ============================================================
+        
+        must_close = False
+        new_selected_item = selected_item_name  # mantém default
+        
+        # Se há item selecionado e NÃO estamos fechando, renderiza o editor
+        if selected_item_name and not st.session_state.get("close_details_clicked", False):
+            editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
+            edited = st.data_editor(
+                agg_fmt,
+                use_container_width=True,
+                height=420,
+                disabled=[c for c in agg_fmt.columns if c != "Detalhes"],
+                column_config={
+                    "Detalhes": st.column_config.CheckboxColumn(
+                        help="Mostrar detalhes deste item logo abaixo",
+                        default=False
+                    )
+                },
+                key=editor_key
+            )
+        
+            # Lógica original de seleção preservada
+            if "Descrição do Item" not in edited.columns:
+                new_selected_item = None
+            else:
+                curr_series = edited["Detalhes"].astype(bool).reindex(prev_series.index, fill_value=False)
+                turned_on  = (curr_series & ~prev_series)
+                if turned_on.any():
+                    idx = turned_on[turned_on].index[-1]
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                elif not curr_series.any():
+                    new_selected_item = None
+                elif curr_series.sum() == 1:
+                    idx = curr_series.idxmax()
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+                else:
+                    candidates = curr_series[curr_series].index.tolist()
+                    prev_idx = prev_series[prev_series].index.tolist()
+                    pick = [i for i in candidates if i not in prev_idx]
+                    idx = (pick[-1] if pick else candidates[-1])
+                    new_selected_item = edited.loc[idx, "Descrição do Item"]
+        
+            if new_selected_item != selected_item_name:
+                st.session_state[sel_state_key] = new_selected_item
                 st.session_state[ver_key] += 1
                 st.rerun()
-
+        
+        # Se há item selecionado e foi clicado "Fechar detalhes", marcamos para pular o editor
+        if st.session_state.get("close_details_clicked", False):
+            must_close = True
+        
+        # ============================================================
+        # TRATAMENTO DO FECHAMENTO — faz o rerun ANTES de desenhar detalhes
+        # ============================================================
+        if must_close:
+            st.session_state["close_details_clicked"] = False
+            st.session_state[sel_state_key] = None
+            st.session_state[ver_key] += 1
+            st.rerun()
+        
+        # ============================================================
+        # DETALHES — só renderiza quando precisa (e nunca ao fechar)
+        # ============================================================
+        if selected_item_name and not must_close:
+            st.markdown("---")
+            st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
+        
+            # Ao clicar, só seta flag e deixa a lógica acima cuidar do rerun
+            if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
+                st.session_state["close_details_clicked"] = True
+                st.rerun()
+        
+            # A partir daqui, seu bloco original de DETALHES permanece igual:
             desc_col_map = colmap.get("descricao")
             if not desc_col_map or desc_col_map not in df_view.columns:
                 st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
@@ -1771,14 +1798,14 @@ with tab_glosas:
                 sel_name_str = str(selected_item_name)
                 mask_item = (df_view[desc_col_map].astype(str) == sel_name_str)
                 mask_glosa = (mask_item & (df_view["_is_glosa"] == True)) if "_is_glosa" in df_view.columns else mask_item
-
+        
                 amhp_col2 = colmap.get("amhptiss")
                 if not amhp_col2:
                     for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
                         if cand in df_view.columns:
                             amhp_col2 = cand
                             break
-
+        
                 possiveis = [
                     amhp_col2,
                     colmap.get("convenio"),
@@ -1793,44 +1820,45 @@ with tab_glosas:
                     colmap.get("valor_recursado"),
                 ]
                 show_cols = [c for c in possiveis if c and c in df_view.columns]
-
+        
                 df_item = df_view.loc[mask_glosa, show_cols]
-
+        
                 vc = colmap.get("valor_cobrado")
                 vg = colmap.get("valor_glosa")
                 vr = colmap.get("valor_recursado")
-
+        
                 cols_min = [c for c in [vc, vg] if c and c in df_view.columns]
                 df_item_all = df_view.loc[mask_item, cols_min] if cols_min else df_view.loc[mask_item, []]
-
+        
                 qtd_itens_cobrados = int(mask_item.sum())
                 total_cobrado = float(df_item_all[vc].sum()) if vc in df_item_all.columns else 0.0
-
+        
                 if "_valor_glosa_abs" in df_view.columns:
                     total_glosado = float(df_view.loc[mask_glosa, "_valor_glosa_abs"].sum())
                 elif vg and vg in df_view.columns:
                     total_glosado = float(df_view.loc[mask_glosa, vg].abs().sum())
                 else:
                     total_glosado = 0.0
-
+        
                 st.markdown("### 📌 Resumo do item")
                 st.write(f"**Itens cobrados:** {qtd_itens_cobrados}")
                 st.write(f"**Total cobrado:** {f_currency(total_cobrado)}")
                 st.write(f"**Total glosado:** {f_currency(total_glosado)}")
                 st.markdown("---")
-
+        
+                # Ordenação pelo valor glosado (quando existir)
                 if "_valor_glosa_abs" in df_view.columns:
                     order_series = df_view.loc[mask_glosa, "_valor_glosa_abs"]
                 elif vg and vg in df_view.columns:
                     order_series = df_view.loc[mask_glosa, vg].abs()
                 else:
                     order_series = None
-
+        
                 if order_series is not None and not order_series.empty:
                     df_item = df_item.loc[order_series.sort_values(ascending=False).index]
-
+        
                 money_cols_fmt = [c for c in [vc, vg, vr] if c in df_item.columns]
-
+        
                 if not df_item.empty:
                     st.dataframe(
                         apply_currency(df_item, money_cols_fmt),
@@ -1842,7 +1870,7 @@ with tab_glosas:
                         "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
                         "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
                     )
-
+        
                 base_cols = df_item.columns.tolist()
                 st.download_button(
                     "⬇️ Baixar relação (CSV) — apenas guias com glosa",
@@ -1850,6 +1878,8 @@ with tab_glosas:
                     file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', selected_item_name)[:40]}.csv",
                     mime="text/csv",
                 )
+
+
 
         # Export análise XLSX (glosas) — mensal somando Valor Cobrado (Valor Original)
         st.markdown("---")
