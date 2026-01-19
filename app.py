@@ -1419,145 +1419,145 @@ with tab_glosas:
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------
         
-    st.markdown("### 🧩 Itens/descrições com maior valor glosado")
+        st.markdown("### 🧩 Itens/descrições com maior valor glosado")
 
-    top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
-    if top_itens.empty:
-        st.info("Coluna de 'Descrição' não encontrada.")
-    else:
-        df_items = top_itens.copy()
-        # Normaliza nomes compatíveis com a UI
-        if "Descrição do Item" not in df_items.columns:
-            desc_col = colmap.get("descricao")
-            if desc_col and desc_col in df_items.columns:
-                df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
-        if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
-            df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
+        top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
+        if top_itens.empty:
+            st.info("Coluna de 'Descrição' não encontrada.")
+        else:
+            df_items = top_itens.copy()
+            # Normaliza nomes compatíveis com a UI
+            if "Descrição do Item" not in df_items.columns:
+                desc_col = colmap.get("descricao")
+                if desc_col and desc_col in df_items.columns:
+                    df_items = df_items.rename(columns={desc_col: "Descrição do Item"})
+            if "Valor Glosado (R$)" not in df_items.columns and "Valor_Glosado" in df_items.columns:
+                df_items = df_items.rename(columns={"Valor_Glosado": "Valor Glosado (R$)"})
 
-        # Garante coluna Qtd (se analytics não trouxe)
-        if "Qtd" not in df_items.columns:
-            if colmap and "_is_glosa" in df_view.columns and colmap.get("descricao") in df_view.columns:
-                qtd_series = (df_view[df_view["_is_glosa"] == True]
-                              .groupby(colmap["descricao"])["_is_glosa"].size())
-                df_items["Qtd"] = df_items["Descrição do Item"].map(qtd_series).fillna(0).astype(int)
-            else:
-                df_items["Qtd"] = 0
-
-        # Top 20
-        df_items_top = df_items.head(20).copy()
-
-        # Formatação de moeda só para a exibição
-        df_items_show = apply_currency(df_items_top.copy(), ["Valor Glosado (R$)"])
-
-        # Coluna de ação (checkbox) para abrir detalhes
-        df_items_show["🔍 Detalhes"] = False
-
-        st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
-        edited = st.data_editor(
-            df_items_show,
-            use_container_width=True,
-            height=420,
-            disabled=[c for c in df_items_show.columns if c != "🔍 Detalhes"],
-            column_config={
-                "🔍 Detalhes": st.column_config.CheckboxColumn(
-                    help="Mostrar detalhes deste item logo abaixo",
-                    default=False
-                )
-            },
-            key="top_itens_editor"
-        )
-
-        # Se algum checkbox foi marcado, mostra o último selecionado
-        det_indices = edited.index[edited["🔍 Detalhes"] == True].tolist()
-        if det_indices:
-            idx = det_indices[-1]
-            item_nome = df_items_top.iloc[idx]["Descrição do Item"]
-
-            st.markdown(f"#### 🔎 Detalhes — {item_nome}")
-
-            # Filtra apenas guias glosadas daquele item no recorte atual
-            desc_col_map = colmap.get("descricao")
-            if not desc_col_map or desc_col_map not in df_view.columns:
-                st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
-            else:
-                df_item = df_view[
-                    (df_view[desc_col_map].astype(str) == str(item_nome)) &
-                    (df_view["_is_glosa"] == True)
-                ].copy()
-
-                if df_item.empty:
-                    st.info(
-                        "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
-                        "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
-                    )
+            # Garante coluna Qtd (se analytics não trouxe)
+            if "Qtd" not in df_items.columns:
+                if colmap and "_is_glosa" in df_view.columns and colmap.get("descricao") in df_view.columns:
+                    qtd_series = (df_view[df_view["_is_glosa"] == True]
+                                  .groupby(colmap["descricao"])["_is_glosa"].size())
+                    df_items["Qtd"] = df_items["Descrição do Item"].map(qtd_series).fillna(0).astype(int)
                 else:
-                    # Identifica coluna AMHPTISS, se existir
-                    amhp_col2 = colmap.get("amhptiss")
-                    if not amhp_col2:
-                        for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
-                            if cand in df_item.columns:
-                                amhp_col2 = cand
-                                break
-
-                    # Define colunas relevantes para exibição
-                    possiveis = [
-                        amhp_col2,
-                        colmap.get("convenio"),
-                        colmap.get("prestador"),
-                        colmap.get("data_pagamento"),
-                        colmap.get("data_realizado"),
-                        colmap.get("motivo"),
-                        colmap.get("desc_motivo"),
-                        colmap.get("cobranca"),
-                        colmap.get("valor_cobrado"),
-                        colmap.get("valor_glosa"),
-                        colmap.get("valor_recursado"),
-                    ]
-                    show_cols = [c for c in possiveis if c and c in df_item.columns]
-
-                    # Totais do detalhamento
-                    total_reg = len(df_item)
-                    total_cobrado_item = 0.0
-                    if colmap.get("valor_cobrado") in df_item.columns:
-                        total_cobrado_item = pd.to_numeric(df_item[colmap["valor_cobrado"]], errors="coerce").fillna(0).sum()
-                    total_glosa_item = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
-
-                    st.write(
-                        f"**Registros (glosados):** {total_reg}  •  "
-                        f"**Cobrado (lista):** {f_currency(total_cobrado_item)}  •  "
-                        f"**Glosa (lista):** {f_currency(total_glosa_item)}"
+                    df_items["Qtd"] = 0
+    
+            # Top 20
+            df_items_top = df_items.head(20).copy()
+    
+            # Formatação de moeda só para a exibição
+            df_items_show = apply_currency(df_items_top.copy(), ["Valor Glosado (R$)"])
+    
+            # Coluna de ação (checkbox) para abrir detalhes
+            df_items_show["🔍 Detalhes"] = False
+    
+            st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
+            edited = st.data_editor(
+                df_items_show,
+                use_container_width=True,
+                height=420,
+                disabled=[c for c in df_items_show.columns if c != "🔍 Detalhes"],
+                column_config={
+                    "🔍 Detalhes": st.column_config.CheckboxColumn(
+                        help="Mostrar detalhes deste item logo abaixo",
+                        default=False
                     )
-
-                    # Formatação de moeda no detalhamento
-                    money_cols_fmt = []
-                    if colmap.get("valor_cobrado") and (colmap["valor_cobrado"] in show_cols):
-                        money_cols_fmt.append(colmap["valor_cobrado"])
-                    if colmap.get("valor_glosa") and (colmap["valor_glosa"] in show_cols):
-                        money_cols_fmt.append(colmap["valor_glosa"])
-                    if colmap.get("valor_recursado") and (colmap["valor_recursado"] in show_cols):
-                        money_cols_fmt.append(colmap["valor_recursado"])
-
-                    if "_valor_glosa_abs" in df_item.columns:
-                        df_item = df_item.sort_values("_valor_glosa_abs", ascending=False)
-
-                    # Exibição dos detalhes
-                    if show_cols:
-                        st.dataframe(
-                            apply_currency(df_item[show_cols], money_cols_fmt),
-                            use_container_width=True,
-                            height=420,
+                },
+                key="top_itens_editor"
+            )
+    
+            # Se algum checkbox foi marcado, mostra o último selecionado
+            det_indices = edited.index[edited["🔍 Detalhes"] == True].tolist()
+            if det_indices:
+                idx = det_indices[-1]
+                item_nome = df_items_top.iloc[idx]["Descrição do Item"]
+    
+                st.markdown(f"#### 🔎 Detalhes — {item_nome}")
+    
+                # Filtra apenas guias glosadas daquele item no recorte atual
+                desc_col_map = colmap.get("descricao")
+                if not desc_col_map or desc_col_map not in df_view.columns:
+                    st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
+                else:
+                    df_item = df_view[
+                        (df_view[desc_col_map].astype(str) == str(item_nome)) &
+                        (df_view["_is_glosa"] == True)
+                    ].copy()
+    
+                    if df_item.empty:
+                        st.info(
+                            "Nenhuma **guia com glosa** encontrada para este item no recorte atual. "
+                            "Se quiser verificar todas as guias cobradas, use a busca por Nº AMHPTISS."
                         )
                     else:
-                        st.dataframe(df_item, use_container_width=True, height=420)
-
-                    # Export CSV desse item
-                    base_cols = show_cols if show_cols else df_item.columns.tolist()
-                    st.download_button(
-                        "⬇️ Baixar relação (CSV) — apenas guias com glosa",
-                        data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
-                        file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_nome)[:40]}.csv",
-                        mime="text/csv",
-                    )
+                        # Identifica coluna AMHPTISS, se existir
+                        amhp_col2 = colmap.get("amhptiss")
+                        if not amhp_col2:
+                            for cand in ["Amhptiss", "AMHPTISS", "AMHP TISS", "Nº AMHPTISS", "Numero AMHPTISS", "Número AMHPTISS"]:
+                                if cand in df_item.columns:
+                                    amhp_col2 = cand
+                                    break
+    
+                        # Define colunas relevantes para exibição
+                        possiveis = [
+                            amhp_col2,
+                            colmap.get("convenio"),
+                            colmap.get("prestador"),
+                            colmap.get("data_pagamento"),
+                            colmap.get("data_realizado"),
+                            colmap.get("motivo"),
+                            colmap.get("desc_motivo"),
+                            colmap.get("cobranca"),
+                            colmap.get("valor_cobrado"),
+                            colmap.get("valor_glosa"),
+                            colmap.get("valor_recursado"),
+                        ]
+                        show_cols = [c for c in possiveis if c and c in df_item.columns]
+    
+                        # Totais do detalhamento
+                        total_reg = len(df_item)
+                        total_cobrado_item = 0.0
+                        if colmap.get("valor_cobrado") in df_item.columns:
+                            total_cobrado_item = pd.to_numeric(df_item[colmap["valor_cobrado"]], errors="coerce").fillna(0).sum()
+                        total_glosa_item = df_item["_valor_glosa_abs"].sum() if "_valor_glosa_abs" in df_item.columns else 0.0
+    
+                        st.write(
+                            f"**Registros (glosados):** {total_reg}  •  "
+                            f"**Cobrado (lista):** {f_currency(total_cobrado_item)}  •  "
+                            f"**Glosa (lista):** {f_currency(total_glosa_item)}"
+                        )
+    
+                        # Formatação de moeda no detalhamento
+                        money_cols_fmt = []
+                        if colmap.get("valor_cobrado") and (colmap["valor_cobrado"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_cobrado"])
+                        if colmap.get("valor_glosa") and (colmap["valor_glosa"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_glosa"])
+                        if colmap.get("valor_recursado") and (colmap["valor_recursado"] in show_cols):
+                            money_cols_fmt.append(colmap["valor_recursado"])
+    
+                        if "_valor_glosa_abs" in df_item.columns:
+                            df_item = df_item.sort_values("_valor_glosa_abs", ascending=False)
+    
+                        # Exibição dos detalhes
+                        if show_cols:
+                            st.dataframe(
+                                apply_currency(df_item[show_cols], money_cols_fmt),
+                                use_container_width=True,
+                                height=420,
+                            )
+                        else:
+                            st.dataframe(df_item, use_container_width=True, height=420)
+    
+                        # Export CSV desse item
+                        base_cols = show_cols if show_cols else df_item.columns.tolist()
+                        st.download_button(
+                            "⬇️ Baixar relação (CSV) — apenas guias com glosa",
+                            data=df_item[base_cols].to_csv(index=False).encode("utf-8"),
+                            file_name=f"guias_com_glosa_item_{re.sub(r'[^A-Za-z0-9_-]+','_', item_nome)[:40]}.csv",
+                            mime="text/csv",
+                        )
 
         # Convênios (SEM gráficos)
         st.markdown("### 🏥 Convênios com maior valor glosado")
