@@ -1483,11 +1483,12 @@ with tab_glosas:
                     def digits(s):
                         return re.sub(r"\D+", "", str(s or ""))
             
-                    # FECHAR — instantâneo
+                    # FECHAR — instantâneo                    
                     if clique_fechar:
                         st.session_state.amhp_result_df = None
                         st.session_state.amhp_result_num = ""
-                        # Sem st.rerun() — rápido
+                        st.rerun()   # ← força atualização instantânea
+
                         
             
                     # BUSCAR
