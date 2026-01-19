@@ -1232,6 +1232,14 @@ with tab_glosas:
 
         # Aplicar filtros
         df_view = df_g.copy()
+        amhp_col = colmap.get("amhptiss")
+        if amhp_col and amhp_col in df_view.columns:
+            df_view[amhp_col] = (
+                df_view[amhp_col]
+                .astype(str)
+                .str.replace(r"[^\d]", "", regex=True)
+                .str.strip()
+            )
         if conv_sel != "(todos)" and colmap.get("convenio") and colmap["convenio"] in df_view.columns:
             df_view = df_view[df_view[colmap["convenio"]].astype(str) == conv_sel]
         if has_pagto and mes_sel_label:
@@ -1611,9 +1619,19 @@ with tab_glosas:
                 st.warning("Não foi possível localizar a coluna de descrição original no dataset. Verifique o mapeamento.")
             else:
                 df_item = df_view[
+                
                     (df_view[desc_col_map].astype(str) == str(selected_item_name)) &
                     (df_view["_is_glosa"] == True)
                 ].copy()
+                
+                if amhp_col2 and amhp_col2 in df_item.columns:
+                    df_item[amhp_col2] = (
+                        df_item[amhp_col2]
+                        .astype(str)
+                        .str.replace(r"[^\d]", "", regex=True)
+                        .str.strip()
+                    )
+
         
                 if df_item.empty:
                     st.info(
