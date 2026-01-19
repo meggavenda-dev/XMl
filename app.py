@@ -1419,6 +1419,7 @@ with tab_glosas:
 
         # ---------- Itens/descrições com maior valor glosado (Detalhes só com glosa) ----------          
         
+        
         st.markdown("### 🧩 Itens/descrições com maior valor glosado")
         
         top_itens = analytics["top_itens"] if analytics else pd.DataFrame()
@@ -1455,13 +1456,24 @@ with tab_glosas:
             # -------------------------------
             # Seleção ÚNICA de "Detalhes"
             # -------------------------------
-            sel_state_key = "top_itens_editor_selected"  # armazena o nome do item selecionado
-            selected_item_name = st.session_state.get(sel_state_key)
+            sel_state_key = "top_itens_editor_selected"     # string com o nome selecionado (ou None)
+            ver_key       = "top_itens_editor_version"      # inteiro para forçar reset do data_editor
         
-            # Cria/atualiza a coluna de checkboxes pré-marcando somente o item selecionado no estado
-            df_items_show["🔍 Detalhes"] = df_items_show.get("Descrição do Item", "").astype(str) == str(selected_item_name)
+            if ver_key not in st.session_state:
+                st.session_state[ver_key] = 0
+            if sel_state_key not in st.session_state:
+                st.session_state[sel_state_key] = None
+        
+            selected_item_name = st.session_state[sel_state_key]
+        
+            # Pré-marca apenas o item que está no estado
+            df_items_show["🔍 Detalhes"] = (
+                df_items_show.get("Descrição do Item", "").astype(str) == str(selected_item_name)
+            )
         
             st.caption("Clique em **🔍 Detalhes** para abrir a relação das guias (somente com glosa) deste item.")
+            editor_key = f"top_itens_editor__v{st.session_state[ver_key]}"
+        
             edited = st.data_editor(
                 df_items_show,
                 use_container_width=True,
@@ -1473,24 +1485,29 @@ with tab_glosas:
                         default=False
                     )
                 },
-                key="top_itens_editor"
+                key=editor_key
             )
         
-            # Descobre a nova seleção a partir do DataFrame editado
+            # Descobre o que ficou marcado NO RESULTADO EDITADO
             if "Descrição do Item" not in edited.columns:
                 st.warning("Coluna 'Descrição do Item' não está presente na tabela exibida.")
                 new_selected_item = None
             else:
                 sel_rows = edited[edited["🔍 Detalhes"] == True]
-                new_selected_item = sel_rows["Descrição do Item"].iloc[-1] if not sel_rows.empty else None
+                if sel_rows.empty:
+                    new_selected_item = None
+                else:
+                    # Se houver mais de um marcado (situação transitória), forçamos a escolha do último
+                    new_selected_item = sel_rows["Descrição do Item"].iloc[-1]
         
-            # Se a seleção mudou, atualiza o estado e rerenderiza a página para garantir apenas 1 marcado
+            # Se a seleção mudou, atualiza o estado e RESETA o editor (muda o key → limpa checkboxes antigos)
             if new_selected_item != selected_item_name:
                 st.session_state[sel_state_key] = new_selected_item
+                st.session_state[ver_key] += 1      # muda a chave do data_editor
                 st.rerun()
         
-            # Usa o que está no estado como seleção vigente
-            selected_item_name = st.session_state.get(sel_state_key)
+            # Usa a seleção vigente do estado
+            selected_item_name = st.session_state[sel_state_key]
         
             if selected_item_name:
                 st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
