@@ -1503,7 +1503,7 @@ with tab_glosas:
                     numero_alvo = st.session_state.amhp_result_num
                 
                    
-                     --- 🔧 Normalizar motivo de glosa (evitar 2,012 etc.) ---
+                    #--- 🔧 Normalizar motivo de glosa (evitar 2,012 etc.) ---
                     motivo_col = colmap.get("motivo")
                     if motivo_col and motivo_col in result.columns:
                         result[motivo_col] = (
