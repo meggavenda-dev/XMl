@@ -1487,10 +1487,12 @@ with tab_glosas:
 
                 def digits(s): return re.sub(r"\D+", "", str(s or ""))
 
+
                 if clique_fechar:
                     st.session_state.amhp_query = ""
                     st.session_state.amhp_result = None
-                    st.stop()
+                    st.rerun()   # 🔄 não interrompe a página, apenas recarrega
+
 
                 
                 if clique_buscar:
@@ -1598,10 +1600,12 @@ with tab_glosas:
             st.markdown("---")
             st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
 
+            
             if st.button("❌ Fechar detalhes", key="btn_fechar_detalhes_item"):
                 st.session_state[sel_state_key] = None
                 st.session_state[ver_key] += 1
-                st.stop()
+                st.rerun()   # 🔄 não afeta outros blocos
+
 
             desc_col_map = colmap.get("descricao")
             if not desc_col_map or desc_col_map not in df_view.columns:
