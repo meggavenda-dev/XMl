@@ -1508,16 +1508,25 @@ with tab_glosas:
                 # Exibição dos resultados (se houver no estado)
                 if st.session_state.amhp_result_df is not None:
                     result = st.session_state.amhp_result_df.copy()
-                    numero_alvo = st.session_state.amhp_result_num
-                
+                    numero_alvo = st.session_state.amhp_result_num               
                    
-                    #--- 🔧 Normalizar motivo de glosa (evitar 2,012 etc.) ---
+                   
+                    # 🔧 Normalizar Nº AMHPTISS (opcional, só para exibição)
+                    if amhp_col in result.columns:
+                        result[amhp_col] = (
+                            result[amhp_col]
+                            .astype(str)
+                            .str.replace(r"[^\d]", "", regex=True)
+                            .str.strip()
+                        )
+                    
+                    # 🔧 Normalizar "Motivo Glosa" (evitar 2,012 etc.)
                     motivo_col = colmap.get("motivo")
                     if motivo_col and motivo_col in result.columns:
                         result[motivo_col] = (
                             result[motivo_col]
                             .astype(str)
-                            .str.replace(r"[^\d]", "", regex=True)   # remove vírgula, ponto
+                            .str.replace(r"[^\d]", "", regex=True)
                             .str.strip()
                         )
             
