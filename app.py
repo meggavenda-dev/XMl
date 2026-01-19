@@ -610,7 +610,6 @@ def conciliar_itens(
 
     if not conc.empty:
         conc = _alias_xml_cols(conc)
-        # Mantém a auditoria original; se quiser, pode desativar/alterar este diff.
         conc["apresentado_diff"] = conc["valor_total"] - conc["valor_apresentado"]
         conc["glosa_pct"] = conc.apply(
             lambda r: (r["valor_glosa"] / r["valor_apresentado"]) if r.get("valor_apresentado", 0) > 0 else 0.0,
@@ -758,9 +757,10 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     concatena e retorna (df, colmap) com mapeamento de colunas.
     Cria sempre colunas de Pagamento derivadas (_pagto_dt/_ym/_mes_br).
 
-    Correções aplicadas:
-      • "Valor Cobrado" passa a usar a coluna "Valor Original" (override)
-      • "Realizado": quando há duplicatas, usa SEMPRE a última coluna "Realizado"
+    Correções:
+      • "Valor Cobrado" passa a usar "Valor Original" (override)
+      • "Realizado": NÃO combinar com "Horário". Só coluna exatamente "Realizado".
+        Se houver duplicatas, usa a ÚLTIMA.
     """
     if not files:
         return pd.DataFrame(), {}
@@ -774,13 +774,13 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
     df = pd.concat(parts, ignore_index=True)
     cols = df.columns
 
-    # Map básico das colunas
+    # ---------- Mapeamento inicial ----------
     colmap = {
         "valor_cobrado": next((c for c in cols if "Valor Cobrado" in str(c)), None),
         "valor_glosa": next((c for c in cols if "Valor Glosa" in str(c)), None),
         "valor_recursado": next((c for c in cols if "Valor Recursado" in str(c)), None),
         "data_pagamento": next((c for c in cols if "Pagamento" in str(c)), None),
-        "data_realizado": None,  # será definido abaixo
+        "data_realizado": None,  # será definido com critério robusto abaixo
         "motivo": next((c for c in cols if "Motivo Glosa" in str(c)), None),
         "desc_motivo": next((c for c in cols if "Descricao Glosa" in str(c) or "Descrição Glosa" in str(c)), None),
         "tipo_glosa": next((c for c in cols if "Tipo de Glosa" in str(c)), None),
@@ -796,14 +796,22 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         "cobranca": next((c for c in cols if str(c).strip().lower() == "cobrança" or "cobranca" in str(c).lower()), None),
     }
 
-    # ✅ "Realizado" – use SEMPRE a ÚLTIMA coluna com esse nome (resolve duplicatas por blocos)
-    realizado_cols = [c for c in cols if str(c).strip().lower() == "realizado"]
-    if realizado_cols:
-        colmap["data_realizado"] = realizado_cols[-1]
+    # ---------- "Realizado" robusto (sem "Horário") ----------
+    norm_cols = [(c, re.sub(r"\s+", " ", str(c)).strip().lower()) for c in cols]
+    realizado_exact = [c for c, n in norm_cols if n == "realizado"]
+    if not realizado_exact:
+        realizado_contains = [c for c, n in norm_cols if ("realizado" in n) and ("horar" not in n)]
     else:
-        colmap["data_realizado"] = next((c for c in cols if "Realizado" in str(c)), None)
+        realizado_contains = []
+    if realizado_exact:
+        col_data_realizado = realizado_exact[-1]
+    elif realizado_contains:
+        col_data_realizado = realizado_contains[-1]
+    else:
+        col_data_realizado = None
+    colmap["data_realizado"] = col_data_realizado
 
-    # ✅ "Valor Cobrado" ← "Valor Original" (override global)
+    # ---------- "Valor Cobrado" ← "Valor Original" ----------
     col_valor_original = next((c for c in cols if str(c).strip().lower() == "valor original"), None)
     if col_valor_original:
         colmap["valor_original"] = col_valor_original
@@ -811,28 +819,29 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
             df[colmap["valor_cobrado"]] = df[col_valor_original]
         else:
             colmap["valor_cobrado"] = col_valor_original
-    # (Se "Valor Original" não existir, mantém o "Valor Cobrado" original da planilha)
 
-    # 🔧 NORMALIZAÇÃO GLOBAL — AMHPTISS sempre como string com dígitos
+    # ---------- Normalização AMHPTISS ----------
     amhp_col = colmap.get("amhptiss")
     if amhp_col and amhp_col in df.columns:
         df[amhp_col] = (
-            df[amhp_col].astype(str)
-                         .str.replace(r"[^\d]", "", regex=True)
-                         .str.strip()
+            df[amhp_col]
+            .astype(str)
+            .str.replace(r"[^\d]", "", regex=True)
+            .str.strip()
         )
 
-    # Números
+    # ---------- Números ----------
     for c in [colmap.get("valor_cobrado"), colmap.get("valor_glosa"), colmap.get("valor_recursado")]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Datas
+    # ---------- Datas ----------
     if colmap.get("data_realizado") and colmap["data_realizado"] in df.columns:
-        df[colmap["data_realizado"]] = pd.to_datetime(df[colmap["data_realizado"]], errors="coerce")
-
+        df[colmap["data_realizado"]] = pd.to_datetime(
+            df[colmap["data_realizado"]], errors="coerce", dayfirst=True
+        )
     if colmap.get("data_pagamento") and colmap["data_pagamento"] in df.columns:
-        df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce")
+        df["_pagto_dt"] = pd.to_datetime(df[colmap["data_pagamento"]], errors="coerce", dayfirst=True)
     else:
         df["_pagto_dt"] = pd.NaT
 
@@ -843,7 +852,7 @@ def read_glosas_xlsx(files) -> tuple[pd.DataFrame, dict]:
         df["_pagto_ym"] = pd.NaT
         df["_pagto_mes_br"] = ""
 
-    # Flags de glosa
+    # ---------- Flags de glosa ----------
     if colmap.get("valor_glosa") in df.columns:
         df["_is_glosa"] = df[colmap["valor_glosa"]] < 0
         df["_valor_glosa_abs"] = df[colmap["valor_glosa"]].abs()
@@ -1267,7 +1276,7 @@ with tab_glosas:
         if has_pagto and mes_sel_label:
             df_view = df_view[df_view["_pagto_mes_br"] == mes_sel_label]
 
-        # Série mensal (Pagamento) — SEM gráficos  ✅ corrigida para somar sempre o Valor Cobrado (Valor Original)
+        # Série mensal (Pagamento) — SEM gráficos (sempre soma o Valor Cobrado = Valor Original)
         st.markdown("### 📅 Glosa por **mês de pagamento**")
         has_pagto = ("_pagto_dt" in df_view.columns) and df_view["_pagto_dt"].notna().any()
         if has_pagto:
@@ -1290,7 +1299,7 @@ with tab_glosas:
             st.info("Sem 'Pagamento' válido para montar série mensal.")
 
         # ==========================================
-        # 🔽 NOVO: trazemos a seção de Convênios para logo abaixo da série mensal
+        # Seções seguintes
         # ==========================================
         analytics = build_glosas_analytics(df_view, colmap)
 
@@ -1302,7 +1311,6 @@ with tab_glosas:
             by_conv_top = by_conv.head(20)
             st.dataframe(apply_currency(by_conv_top, ["Valor Glosado (R$)"]), use_container_width=True, height=320)
 
-        # ---------- Top motivos / Tipos (SEM gráficos) ----------
         st.markdown("### 🥇 Top motivos de glosa (por valor)")
         if not analytics or analytics["top_motivos"].empty:
             st.info("Não foi possível identificar colunas de motivo/descrição de glosa.")
@@ -1404,9 +1412,7 @@ with tab_glosas:
 
             selected_item_name = st.session_state[sel_state_key]
 
-            # ============================================================
-            # 🔎 BUSCA OTIMIZADA POR Nº AMHPTISS (INSTANTÂNEA)
-            # ============================================================
+            # ============ BUSCA POR Nº AMHPTISS ============
             amhp_col = colmap.get("amhptiss")
             if amhp_col and amhp_col in df_g.columns:
                 @st.cache_data
@@ -1543,7 +1549,7 @@ with tab_glosas:
                         if not ignorar_filtros:
                             st.caption("Dica: se algum item não aparecer, marque **“Ignorar filtros de Convênio/Mês”**.")
 
-        # === DETALHES DO ITEM SELECIONADO (recolocado após a busca AMHPTISS) ===
+        # === DETALHES DO ITEM SELECIONADO ===
         if selected_item_name:
             st.markdown("---")
             st.markdown(f"#### 🔎 Detalhes — {selected_item_name}")
@@ -1640,7 +1646,7 @@ with tab_glosas:
                     mime="text/csv",
                 )
 
-        # Export análise XLSX (glosas) — série mensal corrigida
+        # Export análise XLSX (glosas) — mensal somando Valor Cobrado (Valor Original)
         st.markdown("---")
         st.subheader("📥 Exportar análise de Faturas Glosadas (XLSX)")
         from io import BytesIO
@@ -1726,6 +1732,5 @@ with tab_glosas:
 
     if not glosas_files and not st.session_state.glosas_ready:
         st.info("Envie os arquivos e clique em **Processar Faturas Glosadas**.")
-
 
 
