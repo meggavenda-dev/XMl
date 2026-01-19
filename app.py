@@ -1453,10 +1453,16 @@ with tab_glosas:
         
                 # 4) Manter somente as 6 colunas
                 cols_final = ["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]
+                
+                # Garantir que Código seja string (evita vírgulas, formatação numérica e arredondamentos)
                 if "Código" not in agg.columns:
-                    # se não houver Procedimento, cria a coluna vazia para manter layout
                     agg["Código"] = ""
-                agg = agg[cols_final]
+                else:
+                    agg["Código"] = agg["Código"].astype(str).str.replace(r"[^\dA-Za-z]+", "", regex=True).str.strip()
+                
+                # Reorganizar colunas
+                agg = agg[["Código", "Descrição do Item", "Qtd", "Valor cobrado", "Valor glosado"]]
+
         
                 # 5) Formatar moedas
                 agg_fmt = apply_currency(agg.copy(), ["Valor cobrado", "Valor glosado"])
